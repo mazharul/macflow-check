@@ -1,0 +1,92 @@
+# Builds a universal macOS binary when the owner pushes a v* tag and attaches it
+# to a DRAFT release. The owner reviews and publishes the draft, then updates the
+# Homebrew tap with the rendered formula. Nothing here publishes anything.
+#
+# Signing and notarisation run only when these repository secrets exist:
+#   APPLE_CERT_P12_BASE64, APPLE_CERT_PASSWORD, APPLE_SIGNING_IDENTITY,
+#   APPLE_ID, APPLE_TEAM_ID, APPLE_APP_PASSWORD
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+      - name: Check version matches tag
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          crate=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
+          [ "$tag" = "$crate" ] || { echo "tag $tag != Cargo.toml $crate"; exit 1; }
+
+      - name: Test
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets -- -D warnings
+          cargo test --workspace
+
+      - name: Build universal binary
+        run: |
+          cargo build --release --target aarch64-apple-darwin
+          cargo build --release --target x86_64-apple-darwin
+          mkdir -p dist
+          lipo -create -output dist/macflow-check \
+            target/aarch64-apple-darwin/release/macflow-check \
+            target/x86_64-apple-darwin/release/macflow-check
+          lipo -info dist/macflow-check
+          dist/macflow-check --version
+
+      - name: Sign and notarise (when secrets are set)
+        env:
+          CERT: ${{ secrets.APPLE_CERT_P12_BASE64 }}
+          CERT_PASSWORD: ${{ secrets.APPLE_CERT_PASSWORD }}
+          IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: |
+          if [ -z "$CERT" ]; then
+            echo "::warning::Apple signing secrets not set; the binary is unsigned."
+            exit 0
+          fi
+          kc="$RUNNER_TEMP/build.keychain"
+          security create-keychain -p "" "$kc"
+          security set-keychain-settings "$kc"
+          security unlock-keychain -p "" "$kc"
+          echo "$CERT" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$kc" -P "$CERT_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "" "$kc"
+          security list-keychains -d user -s "$kc"
+          codesign --force --options runtime --timestamp --sign "$IDENTITY" dist/macflow-check
+          ditto -c -k dist/macflow-check "$RUNNER_TEMP/notarize.zip"
+          xcrun notarytool submit "$RUNNER_TEMP/notarize.zip" \
+            --apple-id "$APPLE_ID" --team-id "$TEAM_ID" --password "$APP_PASSWORD" --wait
+          codesign --verify --strict --verbose=2 dist/macflow-check
+
+      - name: Package
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          sh scripts/package.sh dist/macflow-check "$version" release
+          sha=$(awk '{print $1}' release/*.sha256)
+          sed -e "s/__VERSION__/$version/g" -e "s/__SHA256__/$sha/" \
+            packaging/homebrew/macflow-check.rb.tmpl > release/macflow-check.rb
+          ls -l release
+
+      - name: Draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" release/* --draft \
+            --title "macflow-check ${GITHUB_REF_NAME}" --generate-notes

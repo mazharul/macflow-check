@@ -1,0 +1,30 @@
+[package]
+name = "macflow-check"
+version = "0.1.0"
+edition = "2021"
+description = "Read-only scan of your Mac's developer setup: AI agent configs, secrets, risky packages"
+license = "MIT"
+repository = "https://github.com/mazharul/macflow-check"
+homepage = "https://macflow.ai/check"
+readme = "README.md"
+keywords = ["macos", "security", "scanner", "mcp", "developer-tools"]
+categories = ["command-line-utilities", "development-tools"]
+
+[[bin]]
+name = "macflow-check"
+path = "src/main.rs"
+
+[dependencies]
+macflow-scan = { path = "crates/macflow-scan" }
+serde_json = "1.0"
+
+[workspace]
+resolver = "2"
+members = [
+    "crates/macflow-scan",
+]
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/mazharul/macflow-check"

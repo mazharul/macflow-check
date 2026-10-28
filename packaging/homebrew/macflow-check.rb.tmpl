@@ -1,0 +1,18 @@
+class MacflowCheck < Formula
+  desc "Read-only scan of your Mac's developer setup: AI agent configs, secrets, risky packages"
+  homepage "https://github.com/mazharul/macflow-check"
+  url "https://github.com/mazharul/macflow-check/releases/download/v__VERSION__/macflow-check-__VERSION__-macos-universal.tar.gz"
+  sha256 "__SHA256__"
+  license "MIT"
+  version "__VERSION__"
+
+  depends_on :macos
+
+  def install
+    bin.install "macflow-check"
+  end
+
+  test do
+    assert_match version.to_s, shell_output("#{bin}/macflow-check --version")
+  end
+end
