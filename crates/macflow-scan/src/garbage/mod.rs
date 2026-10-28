@@ -212,7 +212,7 @@ fn scan_node_modules(project_dirs: &[PathBuf], now: SystemTime) -> (Vec<Finding>
     if total < REPORT_THRESHOLD {
         return (Vec::new(), vec![inspection]);
     }
-    stale.sort_by(|a, b| b.1.cmp(&a.1));
+    stale.sort_by_key(|a| std::cmp::Reverse(a.1));
     let top: Vec<String> = stale
         .iter()
         .take(5)

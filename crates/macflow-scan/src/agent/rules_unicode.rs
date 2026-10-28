@@ -112,7 +112,9 @@ pub fn hidden_chars(text: &str) -> Vec<(usize, Vec<u32>)> {
 fn decode(bytes: &[u8]) -> String {
     let utf16 = |be: bool, skip: usize| {
         let units: Vec<u16> = bytes[skip..]
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|b| {
                 if be {
                     u16::from_be_bytes([b[0], b[1]])
