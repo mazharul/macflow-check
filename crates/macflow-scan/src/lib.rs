@@ -3,6 +3,7 @@ pub mod garbage;
 pub mod models;
 pub mod report;
 pub mod security;
+pub mod summary;
 
 pub use agent::mcp;
 pub use agent::plugins;
@@ -36,3 +37,4 @@ pub use security::{
     scan_shell_with_home, scan_ssh, scan_ssh_with_home, OsvTransport, EXT_SUB_CATEGORY,
     LAUNCH_AGENTS_SUB_CATEGORY, OSV_SUB_CATEGORY, PHP_SUB_CATEGORY, SSH_SUB_CATEGORY,
 };
+pub use summary::{render_group, render_summary, SummaryOptions};

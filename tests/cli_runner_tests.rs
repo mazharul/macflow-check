@@ -54,7 +54,7 @@ fn test_version_and_help_flags() {
         let out = Command::new(bin_path()).arg(flag).output().unwrap();
         assert!(out.status.success(), "{flag} failed");
         let stdout = String::from_utf8_lossy(&out.stdout);
-        assert_eq!(stdout.trim(), "macflow-check 0.1.0");
+        assert_eq!(stdout.trim(), "macflow-check 0.1.1");
     }
 
     for flag in ["--help", "-h"] {
@@ -90,6 +90,7 @@ fn test_terminal_output_structure_and_footer_link() {
 
     let out = Command::new(bin_path())
         .env("MACFLOW_HOME", &home)
+        .arg("--details")
         .arg("--root")
         .arg(&proj)
         .output()
@@ -294,6 +295,7 @@ fn test_vscode_tasks_folder_open_cli() {
 
     let out = Command::new(bin_path())
         .env("MACFLOW_HOME", &home)
+        .arg("--details")
         .arg(&proj)
         .output()
         .unwrap();
@@ -453,9 +455,10 @@ fn test_all_agent_checks_executed_by_cli() {
         "Expected Claude plugins inspection in: {agent_subs:?}"
     );
 
-    // 2. Run in standard output mode
+    // 2. Run in the full per-check listing
     let std_out = Command::new(bin_path())
         .env("MACFLOW_HOME", &home)
+        .arg("--details")
         .arg(&proj)
         .output()
         .expect("failed to execute macflow-check standard mode");
@@ -638,5 +641,157 @@ fn test_security_category_flags_compromised_extension() {
         "{stdout}"
     );
     assert_no_forbidden_words(&stdout);
+    let _ = fs::remove_dir_all(tmp);
+}
+
+/// A home with one urgent finding (bypass mode) and one repo hook, for the default summary.
+fn summary_fixture(label: &str) -> (PathBuf, PathBuf, PathBuf) {
+    let tmp = unique_temp_dir(label);
+    let home = tmp.join("home");
+    let proj = tmp.join("repo");
+    fs::create_dir_all(home.join(".claude")).unwrap();
+    fs::create_dir_all(proj.join(".claude")).unwrap();
+    fs::write(
+        home.join(".claude/settings.json"),
+        r#"{"permissions":{"defaultMode":"bypassPermissions"}}"#,
+    )
+    .unwrap();
+    fs::write(
+        proj.join(".claude/settings.json"),
+        r#"{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"./scripts/init.sh"}]}]}}"#,
+    )
+    .unwrap();
+    (tmp, home, proj)
+}
+
+fn run(home: &PathBuf, args: &[&str], env: &[(&str, &str)]) -> std::process::Output {
+    let mut c = Command::new(bin_path());
+    c.env("MACFLOW_HOME", home)
+        .env_remove("NO_COLOR")
+        .env_remove("CLICOLOR_FORCE");
+    for (k, v) in env {
+        c.env(k, v);
+    }
+    c.args(args).output().unwrap()
+}
+
+#[test]
+fn test_default_output_is_a_short_summary_led_by_what_to_fix() {
+    let (tmp, home, proj) = summary_fixture("summary");
+    let p = proj.to_str().unwrap();
+    let out = run(&home, &["--offline", p], &[]);
+    assert!(out.status.success());
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.starts_with("macflow-check 0.1.1"), "{s}");
+    assert!(
+        s.contains("FIX NOW") && s.contains("Unrestricted permission bypass enabled"),
+        "{s}"
+    );
+    assert!(
+        s.contains("WORTH FIXING") && s.contains("Automatic hook execution at SessionStart"),
+        "{s}"
+    );
+    assert!(
+        !s.contains("[AI agent setup]"),
+        "per-check listing moved to --details:\n{s}"
+    );
+    assert!(
+        s.contains("--details") && s.contains("No known match in:"),
+        "{s}"
+    );
+    assert!(s.trim_end().ends_with("macflow.ai/check"), "{s}");
+    assert!(
+        !s.contains('\x1b'),
+        "no colour when stdout is not a terminal"
+    );
+    assert!(s.lines().count() < 40, "summary stays short:\n{s}");
+    assert_no_forbidden_words(&s);
+    let _ = fs::remove_dir_all(tmp);
+}
+
+#[test]
+fn test_show_prints_one_group_in_full() {
+    let (tmp, home, proj) = summary_fixture("show");
+    let p = proj.to_str().unwrap();
+    let out = run(&home, &["--offline", "--show", "1", p], &[]);
+    assert!(out.status.success());
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        s.contains("Unrestricted permission bypass enabled") && s.contains("Why:"),
+        "{s}"
+    );
+    assert!(!s.contains("FIX NOW"), "only the group:\n{s}");
+
+    let bad = run(&home, &["--offline", "--show", "99", p], &[]);
+    assert_eq!(bad.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&bad.stderr).contains("no group 99"));
+    let missing = run(&home, &["--show"], &[]);
+    assert_eq!(missing.status.code(), Some(2));
+    let _ = fs::remove_dir_all(tmp);
+}
+
+#[test]
+fn test_colour_can_be_forced_and_no_color_always_wins() {
+    let (tmp, home, proj) = summary_fixture("colour");
+    let p = proj.to_str().unwrap();
+    let forced = run(&home, &["--offline", p], &[("CLICOLOR_FORCE", "1")]);
+    assert!(String::from_utf8_lossy(&forced.stdout).contains("\x1b[1;31mFIX NOW"));
+    let both = run(
+        &home,
+        &["--offline", p],
+        &[("CLICOLOR_FORCE", "1"), ("NO_COLOR", "1")],
+    );
+    assert!(!String::from_utf8_lossy(&both.stdout).contains('\x1b'));
+    let flag = run(
+        &home,
+        &["--offline", "--no-color", p],
+        &[("CLICOLOR_FORCE", "1")],
+    );
+    assert!(!String::from_utf8_lossy(&flag.stdout).contains('\x1b'));
+    let _ = fs::remove_dir_all(tmp);
+}
+
+#[test]
+fn test_help_lists_the_report_options() {
+    let out = Command::new(bin_path()).arg("--help").output().unwrap();
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        s.contains("--details") && s.contains("--show <N>") && s.contains("--no-color"),
+        "{s}"
+    );
+}
+
+#[test]
+fn test_no_color_with_any_value_turns_colour_off() {
+    let (tmp, home, proj) = summary_fixture("nocolor0");
+    let p = proj.to_str().unwrap();
+    let out = run(
+        &home,
+        &["--offline", p],
+        &[("CLICOLOR_FORCE", "1"), ("NO_COLOR", "0")],
+    );
+    assert!(!String::from_utf8_lossy(&out.stdout).contains('\x1b'));
+    let _ = fs::remove_dir_all(tmp);
+}
+
+#[test]
+fn test_json_with_show_or_details_is_rejected() {
+    let (tmp, home, _proj) = summary_fixture("jsonshow");
+    for extra in [&["--show", "1"][..], &["--details"][..]] {
+        let mut args = vec!["--offline", "--json"];
+        args.extend_from_slice(extra);
+        let out = run(&home, &args, &[]);
+        assert_eq!(out.status.code(), Some(2), "{args:?}");
+        assert!(String::from_utf8_lossy(&out.stderr).contains("--json"));
+    }
+    let _ = fs::remove_dir_all(tmp);
+}
+
+#[test]
+fn test_show_with_details_is_rejected() {
+    let (tmp, home, _proj) = summary_fixture("showdetails");
+    let out = run(&home, &["--offline", "--show", "1", "--details"], &[]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("--details"));
     let _ = fs::remove_dir_all(tmp);
 }

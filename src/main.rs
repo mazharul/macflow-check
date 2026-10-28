@@ -1,25 +1,31 @@
+use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::process::ExitCode;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use macflow_scan::{
-    render_json, render_report, scan_agent_autoapprove, scan_claude_plugins, scan_claude_settings,
-    scan_credentials, scan_extensions, scan_garbage, scan_git_config, scan_launch_agents,
-    scan_mcp_servers, scan_osv, scan_php_runtimes, scan_plaintext_keys, scan_rules_unicode,
-    scan_shell, scan_ssh, scan_vscode_tasks, Category, Inspection, ScanContext, ScanResult,
+    render_group, render_json, render_report, render_summary, scan_agent_autoapprove,
+    scan_claude_plugins, scan_claude_settings, scan_credentials, scan_extensions, scan_garbage,
+    scan_git_config, scan_launch_agents, scan_mcp_servers, scan_osv, scan_php_runtimes,
+    scan_plaintext_keys, scan_rules_unicode, scan_shell, scan_ssh, scan_vscode_tasks, Category,
+    Inspection, ScanContext, ScanResult, SummaryOptions,
 };
 
-const VERSION: &str = "macflow-check 0.1.0";
+const VERSION: &str = "macflow-check 0.1.1";
 
 const USAGE: &str = "\
-macflow-check 0.1.0
+macflow-check 0.1.1
 Read-only developer setup and environment scanner for macOS.
 
 USAGE:
     macflow-check [OPTIONS] [PATHS]...
 
 OPTIONS:
+    --details        List every check and finding, not the short summary
+    --show <N>       Show every finding in group N of the summary
+                     (scans again: pass the same paths and --offline)
     --json           Output machine-readable JSON (schema v1)
+    --no-color       Plain text (also NO_COLOR=1; CLICOLOR_FORCE=1 forces colour)
     --offline        Skip network checks and run strictly offline
     --root <PATH>    Add a project root directory to scan (repeatable)
     -h, --help       Print this usage message
@@ -164,6 +170,9 @@ fn run_scan(ctx: &ScanContext) -> ScanResult {
 
 fn main() -> ExitCode {
     let mut json_mode = false;
+    let mut details = false;
+    let mut show: Option<usize> = None;
+    let mut no_color = false;
     let mut offline = false;
     let mut roots: Vec<PathBuf> = Vec::new();
 
@@ -171,6 +180,15 @@ fn main() -> ExitCode {
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--json" => json_mode = true,
+            "--details" => details = true,
+            "--no-color" => no_color = true,
+            "--show" => match args.next().and_then(|n| n.parse::<usize>().ok()) {
+                Some(n) if n > 0 => show = Some(n),
+                _ => {
+                    eprintln!("error: --show requires a group number from the summary");
+                    return ExitCode::from(2);
+                }
+            },
             "--offline" => offline = true,
             "--version" | "-V" => {
                 println!("{VERSION}");
@@ -223,8 +241,27 @@ fn main() -> ExitCode {
         }
     }
 
+    if json_mode && (details || show.is_some()) {
+        eprintln!("error: --json prints every finding already; drop --show or --details");
+        return ExitCode::from(2);
+    }
+    if details && show.is_some() {
+        eprintln!("error: use either --show <N> or --details, not both");
+        return ExitCode::from(2);
+    }
+
     let ctx = ScanContext::new().with_roots(roots).with_offline(offline);
+    let started = Instant::now();
     let result = run_scan(&ctx);
+    let opts = SummaryOptions {
+        color: use_color(no_color),
+        home: std::env::var("MACFLOW_HOME")
+            .or_else(|_| std::env::var("HOME"))
+            .ok(),
+        offline,
+        elapsed_secs: Some(started.elapsed().as_secs_f64()),
+        version: env!("CARGO_PKG_VERSION"),
+    };
 
     if json_mode {
         match render_json(&result) {
@@ -234,11 +271,32 @@ fn main() -> ExitCode {
                 return ExitCode::from(1);
             }
         }
-    } else {
+    } else if let Some(n) = show {
+        match render_group(&result, n, &opts) {
+            Some(out) => print!("{out}"),
+            None => {
+                eprintln!("error: no group {n} in this scan; run macflow-check to see the numbers");
+                return ExitCode::from(2);
+            }
+        }
+    } else if details {
         print!("{}", render_report(&result));
+    } else {
+        print!("{}", render_summary(&result, &opts));
     }
 
     ExitCode::SUCCESS
+}
+
+/// Colour only for a terminal. NO_COLOR and --no-color always win; CLICOLOR_FORCE forces it on.
+fn use_color(no_color_flag: bool) -> bool {
+    // no-color.org: any non-empty NO_COLOR turns colour off, whatever its value.
+    let no_color = std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty());
+    if no_color_flag || no_color {
+        return false;
+    }
+    let forced = std::env::var_os("CLICOLOR_FORCE").is_some_and(|v| !v.is_empty() && v != "0");
+    forced || std::io::stdout().is_terminal()
 }
 
 #[cfg(test)]

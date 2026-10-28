@@ -1,6 +1,6 @@
 [package]
 name = "macflow-check"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "Read-only scan of your Mac's developer setup: AI agent configs, secrets, risky packages"
 license = "MIT"
