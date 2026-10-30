@@ -1,6 +1,6 @@
 [package]
 name = "macflow-scan"
-version = "0.1.1"
+version = "0.1.2"
 edition.workspace = true
 description = "Scanning engine behind macflow-check"
 license.workspace = true

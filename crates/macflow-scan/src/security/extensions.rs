@@ -1,4 +1,5 @@
-use std::path::{Path, PathBuf};
+use std::collections::HashSet;
+use std::path::{Component, Path, PathBuf};
 
 use crate::models::{Category, Finding, Inspection, ScanContext, Severity};
 
@@ -123,6 +124,104 @@ fn check_extension(
     )
 }
 
+fn safe_relative_location(rel: &str) -> Option<&Path> {
+    if rel.is_empty() {
+        return None;
+    }
+    let p = Path::new(rel);
+    if p.components()
+        .all(|c| matches!(c, Component::Normal(_) | Component::CurDir))
+    {
+        Some(p)
+    } else {
+        None
+    }
+}
+
+fn check_extensions_json(
+    ext_dir: &Path,
+    editor: &str,
+    scope: &str,
+    compromised_ids: &mut HashSet<String>,
+    findings: &mut Vec<Finding>,
+) {
+    let json_path = ext_dir.join("extensions.json");
+    let Ok(text) = std::fs::read_to_string(&json_path) else {
+        return;
+    };
+    let Ok(serde_json::Value::Array(entries)) = serde_json::from_str::<serde_json::Value>(&text)
+    else {
+        return;
+    };
+
+    let mut seen_sideloaded = HashSet::new();
+    for entry in entries {
+        let Some(raw_id) = entry["identifier"]["id"].as_str() else {
+            continue;
+        };
+        let id = raw_id.trim().to_lowercase();
+        if id.is_empty() {
+            continue;
+        }
+        let version = entry["version"].as_str().unwrap_or("").trim();
+        let loc_path = entry["relativeLocation"]
+            .as_str()
+            .and_then(safe_relative_location)
+            .map(|rel| ext_dir.join(rel))
+            .or_else(|| {
+                entry["location"]["path"]
+                    .as_str()
+                    .filter(|s| !s.is_empty())
+                    .map(PathBuf::from)
+            })
+            .unwrap_or_else(|| json_path.clone());
+
+        if !compromised_ids.contains(&id) {
+            if let Some(f) = check_extension(&id, version, &loc_path, editor, scope) {
+                compromised_ids.insert(id.clone());
+                findings.push(f);
+                continue;
+            }
+        }
+
+        let Some(source) = entry["metadata"]["source"].as_str() else {
+            continue;
+        };
+        if !(source.eq_ignore_ascii_case("vsix") || source.eq_ignore_ascii_case("resource")) {
+            continue;
+        }
+        if compromised_ids.contains(&id) || !seen_sideloaded.insert(id.clone()) {
+            continue;
+        }
+
+        let ver_suffix = if version.is_empty() {
+            String::new()
+        } else {
+            format!(" {version}")
+        };
+        findings.push(
+            Finding::new(
+                "extension-sideloaded",
+                format!("Sideloaded extension installed in {editor}: {id}{ver_suffix}"),
+                Category::Security,
+                Severity::Medium,
+                format!(
+                    "{id}{ver_suffix} was installed from a local package (metadata.source = \"{source}\") \
+                     rather than the {editor} marketplace gallery. Sideloaded extensions bypass marketplace \
+                     malware checks and automatic revocation."
+                ),
+            )
+            .with_sub_category(EXT_SUB_CATEGORY)
+            .with_scope(scope)
+            .with_location(loc_path.to_string_lossy().as_ref(), None)
+            .with_remediation(
+                "Verify the provenance of the .vsix file. If you did not build or audit it yourself, \
+                 uninstall the extension and install it from the official marketplace instead.",
+            ),
+        );
+    }
+}
+
 pub fn scan_extensions(ctx: &ScanContext) -> (Vec<Finding>, Vec<Inspection>) {
     let home = std::env::var_os("MACFLOW_HOME")
         .or_else(|| std::env::var_os("HOME"))
@@ -165,11 +264,22 @@ pub fn scan_extensions_with_home(
         dirs.sort();
         // Findings carry the inspection's scope so the report files them under this editor.
         let scope = format!("{editor} ({} extensions)", dirs.len());
+        let mut compromised_ids = HashSet::new();
         for d in &dirs {
             if let Some((id, version)) = identify(d) {
-                findings.extend(check_extension(&id, &version, d, editor, &scope));
+                if let Some(f) = check_extension(&id, &version, d, editor, &scope) {
+                    compromised_ids.insert(id);
+                    findings.push(f);
+                }
             }
         }
+        check_extensions_json(
+            &ext_dir,
+            editor,
+            &scope,
+            &mut compromised_ids,
+            &mut findings,
+        );
         inspections.push(Inspection::inspected(
             Category::Security,
             Some(EXT_SUB_CATEGORY),
@@ -543,5 +653,190 @@ mod tests {
         assert!(i
             .iter()
             .all(|x| matches!(x.status, InspectionStatus::Inspected { .. })));
+    }
+
+    #[test]
+    fn test_extension_sideloaded_vsix_is_flagged_medium_and_renders_cleanly() {
+        let home = tmp();
+        install(
+            &home,
+            ".vscode",
+            "acme.internal-helper-1.2.3",
+            "acme",
+            "internal-helper",
+            "1.2.3",
+        );
+        let ext_json = r#"[
+            {
+                "identifier": { "id": "Acme.Internal-Helper", "uuid": "1111" },
+                "version": "1.2.3",
+                "relativeLocation": "acme.internal-helper-1.2.3",
+                "metadata": {
+                    "installedTimestamp": 1753577227722,
+                    "source": "vsix"
+                }
+            }
+        ]"#;
+        fs::write(home.join(".vscode/extensions/extensions.json"), ext_json).unwrap();
+
+        let (f, i) = scan(&home);
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert_eq!(f[0].id, "extension-sideloaded");
+        assert_eq!(f[0].severity, Severity::Medium);
+        assert_eq!(f[0].category, Category::Security);
+        assert_eq!(f[0].sub_category.as_deref(), Some(EXT_SUB_CATEGORY));
+        assert!(f[0]
+            .title
+            .contains("Sideloaded extension installed in VS Code: acme.internal-helper 1.2.3"));
+        assert!(f[0].description.contains("metadata.source = \"vsix\""));
+        assert!(f[0]
+            .file_path
+            .as_deref()
+            .unwrap_or("")
+            .ends_with("acme.internal-helper-1.2.3"));
+
+        let r = render(f, i);
+        assert!(!r.contains("scope unknown"), "{r}");
+        assert!(!r.contains("Other findings"), "{r}");
+    }
+
+    #[test]
+    fn test_extension_sideloaded_resource_is_flagged_medium() {
+        let home = tmp();
+        let ext_dir = home.join(".cursor/extensions");
+        fs::create_dir_all(&ext_dir).unwrap();
+        let loc = ext_dir.join("local.dev-ext-0.1.0");
+        let ext_json = serde_json::json!([
+            {
+                "identifier": { "id": "local.dev-ext" },
+                "version": "0.1.0",
+                "location": { "$mid": 1, "path": loc.to_string_lossy(), "scheme": "file" },
+                "metadata": {
+                    "source": "resource"
+                }
+            }
+        ]);
+        fs::write(ext_dir.join("extensions.json"), ext_json.to_string()).unwrap();
+
+        let (f, i) = scan(&home);
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert_eq!(f[0].id, "extension-sideloaded");
+        assert_eq!(f[0].severity, Severity::Medium);
+        assert!(f[0]
+            .title
+            .contains("Sideloaded extension installed in Cursor: local.dev-ext 0.1.0"));
+        assert!(f[0].description.contains("metadata.source = \"resource\""));
+        assert_eq!(
+            f[0].file_path.as_deref(),
+            Some(loc.to_string_lossy().as_ref())
+        );
+
+        let r = render(f, i);
+        assert!(!r.contains("scope unknown"), "{r}");
+        assert!(!r.contains("Other findings"), "{r}");
+    }
+
+    #[test]
+    fn test_extension_gallery_and_missing_source_not_flagged() {
+        let home = tmp();
+        install(
+            &home,
+            ".vscode",
+            "ms-azuretools.vscode-docker-2.0.0",
+            "ms-azuretools",
+            "vscode-docker",
+            "2.0.0",
+        );
+        let ext_json = r#"[
+            {
+                "identifier": { "id": "ms-azuretools.vscode-docker" },
+                "version": "2.0.0",
+                "relativeLocation": "ms-azuretools.vscode-docker-2.0.0",
+                "metadata": {
+                    "source": "gallery"
+                }
+            },
+            {
+                "identifier": { "id": "ms-python.python" },
+                "version": "2026.2.0",
+                "metadata": {}
+            },
+            {
+                "identifier": { "id": "esbenp.prettier-vscode" },
+                "version": "11.0.0"
+            }
+        ]"#;
+        fs::write(home.join(".vscode/extensions/extensions.json"), ext_json).unwrap();
+
+        let (f, _) = scan(&home);
+        assert!(f.is_empty(), "{f:?}");
+    }
+
+    #[test]
+    fn test_extension_malformed_extensions_json_does_not_break_compromised_folder_scan() {
+        let home = tmp();
+        install(
+            &home,
+            ".vscode",
+            "nrwl.angular-console-18.95.0",
+            "nrwl",
+            "angular-console",
+            "18.95.0",
+        );
+        fs::write(
+            home.join(".vscode/extensions/extensions.json"),
+            "{not valid json",
+        )
+        .unwrap();
+
+        let (f, _) = scan(&home);
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert_eq!(f[0].id, "extension-known-compromised");
+        assert_eq!(f[0].severity, Severity::Critical);
+    }
+
+    #[test]
+    fn test_extension_deduplicates_sideloaded_and_prioritizes_compromised() {
+        let home = tmp();
+        install(
+            &home,
+            ".vscode",
+            "nrwl.angular-console-18.95.0",
+            "nrwl",
+            "angular-console",
+            "18.95.0",
+        );
+        let ext_json = r#"[
+            {
+                "identifier": { "id": "nrwl.angular-console" },
+                "version": "18.95.0",
+                "relativeLocation": "nrwl.angular-console-18.95.0",
+                "metadata": { "source": "vsix" }
+            },
+            {
+                "identifier": { "id": "acme.dup-ext" },
+                "version": "1.0.0",
+                "relativeLocation": "../escape",
+                "metadata": { "source": "VSIX" }
+            },
+            {
+                "identifier": { "id": "acme.dup-ext" },
+                "version": "1.0.1",
+                "metadata": { "source": "vsix" }
+            }
+        ]"#;
+        fs::write(home.join(".vscode/extensions/extensions.json"), ext_json).unwrap();
+
+        let (f, _) = scan(&home);
+        assert_eq!(f.len(), 2, "{f:?}");
+        assert_eq!(f[0].id, "extension-known-compromised");
+        assert_eq!(f[0].severity, Severity::Critical);
+        assert_eq!(f[1].id, "extension-sideloaded");
+        assert_eq!(f[1].severity, Severity::Medium);
+        assert!(f[1]
+            .file_path
+            .as_deref()
+            .unwrap_or("")
+            .ends_with("extensions.json"));
     }
 }

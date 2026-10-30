@@ -54,7 +54,7 @@ fn test_version_and_help_flags() {
         let out = Command::new(bin_path()).arg(flag).output().unwrap();
         assert!(out.status.success(), "{flag} failed");
         let stdout = String::from_utf8_lossy(&out.stdout);
-        assert_eq!(stdout.trim(), "macflow-check 0.1.1");
+        assert_eq!(stdout.trim(), "macflow-check 0.1.2");
     }
 
     for flag in ["--help", "-h"] {
@@ -682,7 +682,7 @@ fn test_default_output_is_a_short_summary_led_by_what_to_fix() {
     let out = run(&home, &["--offline", p], &[]);
     assert!(out.status.success());
     let s = String::from_utf8_lossy(&out.stdout);
-    assert!(s.starts_with("macflow-check 0.1.1"), "{s}");
+    assert!(s.starts_with("macflow-check 0.1.2"), "{s}");
     assert!(
         s.contains("FIX NOW") && s.contains("Unrestricted permission bypass enabled"),
         "{s}"
