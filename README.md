@@ -1,23 +1,62 @@
 # macflow-check
 
-A read-only scanner for the developer setup on your Mac. It looks at the files AI coding agents, package managers and shells read: agent settings, MCP servers, git config, credential files, shell startup files, LaunchAgents and lockfiles. It reports what could run code or leak a secret.
+[![Release](https://img.shields.io/github/v/release/mazharul/macflow-check)](https://github.com/mazharul/macflow-check/releases/latest) [![Licence: MIT](https://img.shields.io/badge/licence-MIT-blue)](LICENSE) ![macOS](https://img.shields.io/badge/platform-macOS-lightgrey)
+
+**Find the settings on your Mac that let an AI agent, a cloned repo or a package run code or read your keys.**
+
+Coding agents run `git`, `npm` and shell commands in repos you did not write. What actually runs is decided by a handful of config files: a hook in `.claude/settings.json`, an MCP server started with `npx -y`, a `core.fsmonitor` line in a repo's git config, a `curl | sh` in `.zshrc`, a token left in `~/.npmrc`. macflow-check reads those files and lists what to fix first.
+
+- **Read-only.** It never changes a file, never runs a program it finds, and never prints a secret: findings name the file, line and kind of value only.
+- **Local.** The only network call sends package names and versions to [OSV](https://osv.dev). `--offline` turns it off.
+- **One binary.** No account, no config, no telemetry.
+
+![macflow-check output: 7 to fix now, 2 worth fixing, each with a fix and a file location](docs/screenshot.png)
+
+<sub>A demo home folder with planted problems. The PHP finding is real: that Mac was a release behind.</sub>
+
+## Install
+
+```sh
+brew install mazharul/tap/macflow-check
+macflow-check
+```
+
+Releases are universal binaries for Apple silicon and Intel Macs. Without Homebrew, download, verify the SHA-256 and install to `~/.local/bin` (no sudo):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/mazharul/macflow-check/main/install.sh | sh
+```
+
+or build from source with a recent stable Rust toolchain:
+
+```sh
+cargo install --git https://github.com/mazharul/macflow-check
+```
+
+## What you get
+
+- **Fix now** (red) and **worth fixing** (yellow), numbered, most urgent first. Each line has a fix and the file and line to change.
+- Findings of the same kind collapse into one line with a count. `macflow-check --show 3` lists every finding in group 3.
+- **Disk space** lists caches and stale `node_modules` you can reclaim, with the command for each.
+- The footer says which checks found nothing and which could not run. "No known match" means none of the checks below matched. It does not mean nothing is wrong.
+- `--details` prints every check and finding; `--json` gives machine-readable output.
 
 ```sh
 macflow-check            # scan ~/code, ~/projects, ~/dev and ~/src
 macflow-check ~/work     # scan a different folder
 macflow-check --offline  # no network at all
+macflow-check --show 1   # every finding in group 1
 ```
 
-It reads files and prints a report. It never changes a file, never runs a program it finds, and never prints a secret: findings name the file, line and kind of value only.
+Colour is on in a terminal and off when the output is piped, with `--no-color`, or when `NO_COLOR` is set.
 
-## Sample output
-
-From a demo home folder with a few planted problems. A real Homebrew PHP finding from the demo machine is left out.
+<details>
+<summary>The same report as plain text</summary>
 
 ```text
-macflow-check 0.1.1 · 0.4s · offline
+macflow-check 0.1.1 · 0.0s · offline
 
-6 to fix now · 2 worth fixing
+7 to fix now · 2 worth fixing
 
 FIX NOW
  1  Remote code fetching in hook command
@@ -26,27 +65,31 @@ FIX NOW
  2  Git config: core.fsmonitor runs a command on every `git status`, including ones an AI agent runs
     → If you did not set this, remove it with `git -C ~/projects/app config --unset-all 'core.fsmonitor'` (or edit ~/projects/app/.git/config) and treat the repository as untrusted.
     ~/projects/app/.git/config:3
- 3  Plaintext OpenAI API key in OPENAI_API_KEY (sk-proj-...)
+ 3  PHP 8.5.2 is missing the 21 Oct 2026 security release
+    → Run `brew upgrade php`.
+    /opt/homebrew/Cellar/php/8.5.2
+ 4  Plaintext OpenAI API key in OPENAI_API_KEY (sk-proj-...)
     → Remove plaintext API key from file and load credentials dynamically via a secret manager or keychain.
     ~/projects/app/.env:1
- 4  npm token stored in plaintext in ~/.npmrc
+ 5  npm token stored in plaintext in ~/.npmrc
     → Remove the token from the file. Publish from CI with npm trusted publishing, or keep the token in Keychain and reference it as ${NPM_TOKEN}.
     ~/.npmrc:1
- 5  ~/.zshrc downloads a script and pipes it to a shell every time a shell starts
+ 6  ~/.zshrc downloads a script and pipes it to a shell every time a shell starts
     → If you did not add this line, delete it from ~/.zshrc, open a new terminal, and rotate tokens that were on this Mac.
     ~/.zshrc:2
- 6  Automatic folderOpen task 'setup'
+ 7  Automatic folderOpen task 'setup'
     → Remove "runOn": "folderOpen" from runOptions or disable automatic task execution (task.allowAutomaticTasks) in VS Code/Cursor.
     ~/projects/app/.vscode/tasks.json:1
 
 WORTH FIXING
- 7  Confirmation before bypass mode is turned off
+ 8  Confirmation before bypass mode is turned off
     → Remove skipDangerousModePermissionPrompt, or set permissions.disableBypassPermissionsMode to true if you never use bypass mode.
     ~/.claude/settings.json:3
- 8  MCP server 'helper' runs unpinned package with npx -y: some-mcp-helper
+ 9  MCP server 'helper' runs unpinned package with npx -y: some-mcp-helper
     → Pin the package to an exact semver version (e.g. npx -y some-mcp-helper@<version>).
     ~/projects/app/.mcp.json:1
 
+Also 1 note (MCP servers): see --details.
 No known match in: Agent auto-approve settings, Developer caches, Editor extensions, Hidden text in agent rules files, Known malware files, Login items (LaunchAgents), SSH keys and config, Secrets in shell history, Stale node_modules
 Not checked: Claude Code plugins (~/.claude/plugins directory not present), Dependency vulnerabilities (OSV) (offline mode)
 Every finding: macflow-check --details · JSON: --json
@@ -55,9 +98,25 @@ From MacFlow, the Mac app that snapshots your dev setup and shows what changed.
 Continuous watching for these checks (planned): macflow.ai/check
 ```
 
-The report leads with what to fix. Findings of the same kind are grouped into one numbered line; `macflow-check --show <N>` lists every finding in group N, and `--details` prints every check and finding. In a terminal, "fix now" is red and "worth fixing" is yellow. Colour is off when the output is piped, with `--no-color`, or when `NO_COLOR` is set.
+</details>
 
-"No known match" means none of the checks below matched. It does not mean nothing is wrong.
+## Why these checks
+
+Each check follows a published incident or advisory:
+
+| Incident | Check |
+| --- | --- |
+| Claude Code project files committed to a repo that ran code and leaked API tokens ([Check Point, CVE-2025-59536](https://research.checkpoint.com/2026/rce-and-api-token-exfiltration-through-claude-code-project-files-cve-2025-59536/)) | Agent auto-approve settings |
+| A repo's git config running a program when an agent runs `git status` ([VulnCheck](https://www.vulncheck.com/advisories/hermes-agent-rce-via-git-core-fsmonitor-config-injection), [Copilot CLI GHSA-9ccr-r5hg-74gf](https://github.com/github/copilot-cli/security/advisories/GHSA-9ccr-r5hg-74gf)) | Git config that runs commands |
+| Invisible Unicode instructions in agent rules files ([Pillar Security](https://www.pillar.security/blog/new-vulnerability-in-github-copilot-and-cursor-how-hackers-can-weaponize-code-agents)) | Hidden text in agent rules files |
+| Malicious npm releases that collected tokens from dotfiles ([Datadog on Shai-Hulud 2.0](https://securitylabs.datadoghq.com/articles/shai-hulud-2.0-npm-worm/), [Nx s1ngularity postmortem](https://nx.dev/blog/s1ngularity-postmortem)) | Plaintext credentials |
+| Compromised editor extension releases ([StepSecurity on Nx Console](https://www.stepsecurity.io/blog/nx-console-vs-code-extension-compromised), [Socket on GlassWorm](https://socket.dev/blog/glassworm-loader-hits-open-vsx-via-suspected-developer-account-compromise)) | Editor extensions, Known malware files |
+| A malicious MCP package that persisted through a LaunchAgent ([SafeDep](https://safedep.io/malicious-copilot-mcp-apex-npm-macos-infostealer/)) | Login items (LaunchAgents) |
+| Stealers persisting in shell startup files and reading shell history ([Hackread on AMOS](https://hackread.com/amos-stealer-macos-keychain-files-browser-passwords/), [Wiz on LiteLLM](https://www.wiz.io/blog/litellm-compromised-steals-credentials)) | Shell startup files, Secrets in shell history |
+
+## What leaves your Mac
+
+One thing, and only when you are online: the dependency check sends each lockfile package's name, version and ecosystem to the OSV `querybatch` API (`https://api.osv.dev/v1/querybatch`), using the system `curl`. Nothing else is sent: no file contents, paths, findings, secrets or usage data. `--offline` skips this call, and the report marks that check as not checked.
 
 ## What it checks
 
@@ -94,30 +153,6 @@ The report leads with what to fix. Findings of the same kind are grouped into on
 | --- | --- |
 | Developer caches | Size of Xcode DerivedData, archives and device support files, simulator caches, and npm, Homebrew, pip and Yarn caches, with the command that clears each. |
 | Stale node_modules | `node_modules` folders in projects untouched for 90 days or more (judged by git activity), and their size on disk. |
-
-## What leaves your Mac
-
-One thing, and only when you are online: the dependency check sends each lockfile package's name, version and ecosystem to the OSV `querybatch` API (`https://api.osv.dev/v1/querybatch`), using the system `curl`. Nothing else is sent: no file contents, paths, findings, secrets or usage data. `--offline` skips this call, and the report marks that check as not checked.
-
-## Install
-
-Releases are universal binaries for Apple silicon and Intel Macs.
-
-```sh
-brew install mazharul/tap/macflow-check
-```
-
-or download, verify the SHA-256 and install to `~/.local/bin` (no sudo):
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/mazharul/macflow-check/main/install.sh | sh
-```
-
-or build from source with a recent stable Rust toolchain:
-
-```sh
-cargo install --git https://github.com/mazharul/macflow-check
-```
 
 ## Usage
 
@@ -162,3 +197,7 @@ To report a vulnerability in macflow-check itself, see [SECURITY.md](SECURITY.md
 ## Licence
 
 MIT. See [LICENSE](LICENSE).
+
+---
+
+macflow-check is made by [MacFlow](https://macflow.ai/check), a Mac app that snapshots your dev setup and shows what changed. Continuous watching for these checks is planned.
