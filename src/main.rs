@@ -11,10 +11,10 @@ use macflow_scan::{
     Inspection, ScanContext, ScanResult, SummaryOptions,
 };
 
-const VERSION: &str = "macflow-check 0.1.2";
+const VERSION: &str = "macflow-check 0.2.0";
 
 const USAGE: &str = "\
-macflow-check 0.1.2
+macflow-check 0.2.0
 Read-only developer setup and environment scanner for macOS.
 
 USAGE:

@@ -112,6 +112,7 @@ Each check follows a published incident or advisory:
 | Malicious npm releases that collected tokens from dotfiles ([Datadog on Shai-Hulud 2.0](https://securitylabs.datadoghq.com/articles/shai-hulud-2.0-npm-worm/), [Nx s1ngularity postmortem](https://nx.dev/blog/s1ngularity-postmortem)) | Plaintext credentials |
 | Compromised editor extension releases ([StepSecurity on Nx Console](https://www.stepsecurity.io/blog/nx-console-vs-code-extension-compromised), [Socket on GlassWorm](https://socket.dev/blog/glassworm-loader-hits-open-vsx-via-suspected-developer-account-compromise)) | Editor extensions, Known malware files |
 | A malicious MCP package that persisted through a LaunchAgent ([SafeDep](https://safedep.io/malicious-copilot-mcp-apex-npm-macos-infostealer/)) | Login items (LaunchAgents) |
+| A trojanized Claude Code extension on Cursor's marketplace that added an SSH key and kept a reverse SSH tunnel open ([StepSecurity](https://www.stepsecurity.io/blog/claude-code-extension-trojanized)) | Editor extensions, Known malware files, SSH keys and config, Login items (LaunchAgents) |
 | Stealers persisting in shell startup files and reading shell history ([Hackread on AMOS](https://hackread.com/amos-stealer-macos-keychain-files-browser-passwords/), [Wiz on LiteLLM](https://www.wiz.io/blog/litellm-compromised-steals-credentials)) | Shell startup files, Secrets in shell history |
 
 ## What leaves your Mac
@@ -137,13 +138,13 @@ One thing, and only when you are online: the dependency check sends each lockfil
 | Check | What it reports |
 | --- | --- |
 | Git config that runs commands | Settings in a repo's own config that run a program on everyday git commands: `core.fsmonitor`, pagers, editors, filters, diff and merge drivers, `sshCommand` with extra options, credential helpers outside system folders, shell aliases, hook folders the repo ships, and `ext::` remotes. Global config is checked too, at Medium. Includes worktrees, submodules, nested bare repos and included config files. |
-| SSH keys and config | Unencrypted private keys, `StrictHostKeyChecking no`, `UserKnownHostsFile /dev/null`, agent forwarding to every host, commands run from temporary folders, and `command=` entries in `authorized_keys`. |
+| SSH keys and config | Unencrypted private keys, `StrictHostKeyChecking no`, `UserKnownHostsFile /dev/null`, agent forwarding to every host, commands run from temporary folders, `command=` entries in `authorized_keys`, and the `svc-telemetry` key added by the trojanized Claude Code extension. |
 | Plaintext credentials | Literal secrets in `~/.npmrc`, `~/.yarnrc.yml`, `~/.pypirc`, `~/.gem/credentials`, `~/.cargo/credentials(.toml)`, `~/.git-credentials` (High) and `~/.netrc`, `pip.conf`, GitHub CLI `hosts.yml` (Medium). Also at Medium: Docker registry logins not kept in a credential store, AWS long-term (`AKIA`) access keys, Google Cloud user credentials, static Kubernetes tokens and client keys (clusters on this Mac and exec plugins are skipped), and the Codex, Gemini CLI and Claude Code login files (existence only). |
 | PHP runtime | PHP installs from Homebrew, MAMP, asdf, mise and phpenv that are behind the latest security release or on a branch that no longer gets fixes. Versions are read from folder names; no PHP binary is run. |
 | Editor extensions | Extension versions named in published compromise reports, and extensions installed from a local `.vsix` file instead of the marketplace (Medium), in VS Code, VS Code Insiders, VSCodium, Cursor and Windsurf. |
-| Known malware files | Files the Nx Console backdoor drops on macOS. |
-| Login items (LaunchAgents) | User LaunchAgents that start a program from a temporary folder, download and run a script, open a browser debugging port, or re-run every minute or more often. Known vendors are skipped. |
-| Dependency vulnerabilities (OSV) | Packages in `package-lock.json`, `Pipfile.lock` and `composer.lock` with known vulnerabilities or known malicious releases, from [OSV](https://osv.dev). |
+| Known malware files | Files the Nx Console and trojanized Claude Code extension backdoors drop on macOS. |
+| Login items (LaunchAgents) | User LaunchAgents that start a program from a temporary folder, download and run a script, open a browser debugging port, keep a reverse SSH tunnel (`ssh -R`) open, use an Apple `com.apple.*` label, or re-run every minute or more often. Known vendors are skipped. |
+| Dependency vulnerabilities (OSV) | Packages in `package-lock.json`, `pnpm-lock.yaml`, `yarn.lock` (Yarn 1 and 2+), `Pipfile.lock`, `poetry.lock`, `uv.lock` and `composer.lock` with known vulnerabilities or known malicious releases, from [OSV](https://osv.dev). With no supported lockfile, the report says the check did not run. |
 | Shell startup files | Lines in `.zshrc`, `.zshenv`, `.zprofile`, `.zlogin`, `.bashrc`, `.bash_profile` and `.profile` that pipe a download into a shell, decode and run base64, start a program from a temporary folder, alias `sudo` to something else, or set an AI agent to approve everything (`GEMINI_CLI_TRUST_WORKSPACE=true`, `gemini --yolo`, `aider --yes-always`). |
 | Secrets in shell history | How many lines of `.zsh_history` and `.bash_history` hold tokens or passwords, and of which kinds. Never the values. |
 
@@ -178,7 +179,7 @@ Exit codes: `0` when the scan finished, whatever it found; `2` for a bad option;
 
 - macOS only.
 - It reads configuration files. It does not look at running processes, network traffic, browser extensions or anything in memory.
-- Dependency checks cover `package-lock.json`, `Pipfile.lock` and `composer.lock` only, not `yarn.lock`, `pnpm-lock.yaml`, `Cargo.lock` or `Gemfile.lock`.
+- Dependency checks read lockfiles only: not `Cargo.lock`, `Gemfile.lock`, `go.sum` or `bun.lock`, and not globally installed packages.
 - Git config trade-offs: a repo's Husky hook folder (`.husky`, `.husky/_`) is not flagged, though its hooks are code the repo ships; programs under `/usr/local` count as installed, though on Intel Macs that folder is writable without sudo; and every `includeIf` file is checked whatever its condition.
 - Every check is a pattern for a known risky setting. A config written to avoid these patterns will get past them.
 

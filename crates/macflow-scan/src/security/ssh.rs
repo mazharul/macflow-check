@@ -278,6 +278,18 @@ pub fn inspect_authorized_keys_content(content: &str, file_path: &str) -> Vec<Fi
         if trimmed.is_empty() || trimmed.starts_with('#') {
             continue;
         }
+        if trimmed.split_whitespace().last() == Some("svc-telemetry") {
+            findings.push(make_finding(
+                "ssh-authorized-keys-known-backdoor",
+                "Backdoor SSH key in authorized_keys",
+                Severity::Critical,
+                "This key's comment, svc-telemetry, matches the key added by the trojanized Claude Code extension on Cursor's marketplace, October 2026 (https://www.stepsecurity.io/blog/claude-code-extension-trojanized). Whoever holds it can log in to this Mac when Remote Login is on.",
+                "Delete this line, turn off Remote Login if you do not use it, then check ~/Library/LaunchAgents/com.apple.sysmond.plist and ~/.config/.smt and rotate the keys that were on this Mac.",
+                file_path,
+                idx + 1,
+            ));
+            continue;
+        }
         if trimmed.contains("command=") || trimmed.contains("command =") {
             findings.push(make_finding(
                 "ssh-authorized-keys-command",

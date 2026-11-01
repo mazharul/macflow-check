@@ -133,11 +133,141 @@ pub fn parse_composer_lock(text: &str) -> Vec<Package> {
     out
 }
 
+/// A version that OSV can match: starts with a digit (skips `link:`, `file:`, URLs, workspaces).
+fn is_version(v: &str) -> bool {
+    v.starts_with(|c: char| c.is_ascii_digit())
+}
+
+/// pnpm-lock.yaml `packages:` keys: `name@1.0.0` (v9), `/name@1.0.0` (v6) or
+/// `/name/1.0.0` (v5), with any `(peer@x)` or `_peer@x` suffix dropped.
+pub fn parse_pnpm_lock(text: &str) -> Vec<Package> {
+    let mut out = Vec::new();
+    let mut in_packages = false;
+    for line in text.lines() {
+        if !line.is_empty() && !line.starts_with(' ') {
+            in_packages = line.trim_end() == "packages:";
+            continue;
+        }
+        let Some(key) = line
+            .strip_prefix("  ")
+            .filter(|k| in_packages && !k.starts_with(' '))
+        else {
+            continue;
+        };
+        let key = match key.split_once(": ") {
+            Some((k, _)) => k,
+            None => key.trim_end().strip_suffix(':').unwrap_or(""),
+        };
+        let key = key.trim_matches(|c| c == '\'' || c == '"');
+        let key = key.strip_prefix('/').unwrap_or(key);
+        let key = key.split('(').next().unwrap_or(key);
+        // v5: the last path segment is the version.
+        let split = match key.rsplit_once('/') {
+            Some((name, ver)) if is_version(ver) => {
+                Some((name, ver.split('_').next().unwrap_or(ver)))
+            }
+            _ => key
+                .rfind('@')
+                .filter(|&i| i > 0)
+                .map(|i| (&key[..i], &key[i + 1..])),
+        };
+        if let Some((name, ver)) = split.filter(|(_, v)| is_version(v)) {
+            out.push(pkg("npm", name, ver));
+        }
+    }
+    out
+}
+
+/// yarn.lock, Yarn 1 (`version "1.0.0"`) and Yarn 2+ (`version: 1.0.0`).
+/// Workspace, patch, link, portal, file and exec entries are skipped.
+pub fn parse_yarn_lock(text: &str) -> Vec<Package> {
+    fn name_of(header: &str) -> Option<String> {
+        let first = header.split(',').next()?.trim().trim_matches('"');
+        if ["workspace:", "patch:", "link:", "portal:", "file:", "exec:"]
+            .iter()
+            .any(|p| first.contains(p))
+        {
+            return None;
+        }
+        let at = first.get(1..)?.find('@')? + 1;
+        Some(first[..at].to_string())
+    }
+    let mut out = Vec::new();
+    let mut name: Option<String> = None;
+    for line in text.lines() {
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if !line.starts_with(' ') {
+            name = line.trim_end().strip_suffix(':').and_then(name_of);
+            continue;
+        }
+        let Some(rest) = line.trim().strip_prefix("version") else {
+            continue;
+        };
+        if !rest.starts_with([' ', ':']) {
+            continue;
+        }
+        let ver = rest.trim_start_matches(':').trim().trim_matches('"');
+        if let Some(n) = name.take().filter(|_| is_version(ver)) {
+            out.push(pkg("npm", &n, ver));
+        }
+    }
+    out
+}
+
+fn toml_packages(text: &str) -> Vec<toml::Value> {
+    toml::from_str::<toml::Table>(text)
+        .ok()
+        .and_then(|t| t.get("package").and_then(|p| p.as_array()).cloned())
+        .unwrap_or_default()
+}
+
+/// uv.lock: packages from a registry (the project itself and editable/path sources are skipped).
+pub fn parse_uv_lock(text: &str) -> Vec<Package> {
+    toml_packages(text)
+        .iter()
+        .filter(|p| p.get("source").and_then(|s| s.get("registry")).is_some())
+        .filter_map(|p| {
+            Some(pkg(
+                "PyPI",
+                p.get("name")?.as_str()?,
+                p.get("version")?.as_str()?,
+            ))
+        })
+        .collect()
+}
+
+/// poetry.lock: every package except directory, file, git and url sources.
+pub fn parse_poetry_lock(text: &str) -> Vec<Package> {
+    toml_packages(text)
+        .iter()
+        .filter(|p| {
+            let kind = p
+                .get("source")
+                .and_then(|s| s.get("type"))
+                .and_then(|t| t.as_str());
+            !matches!(kind, Some("directory" | "file" | "git" | "url"))
+        })
+        .filter_map(|p| {
+            Some(pkg(
+                "PyPI",
+                p.get("name")?.as_str()?,
+                p.get("version")?.as_str()?,
+            ))
+        })
+        .collect()
+}
+
 type Parser = fn(&str) -> Vec<Package>;
 
 const LOCKFILES: &[(&str, Parser)] = &[
     ("package-lock.json", parse_package_lock),
+    ("pnpm-lock.yaml", parse_pnpm_lock),
+    ("yarn.lock", parse_yarn_lock),
     ("Pipfile.lock", parse_pipfile_lock),
+    ("poetry.lock", parse_poetry_lock),
+    ("uv.lock", parse_uv_lock),
     ("composer.lock", parse_composer_lock),
 ];
 
@@ -289,9 +419,11 @@ fn grouped_finding(lockfile: &Path, mut hits: Vec<(&Package, &Vec<String>)>) -> 
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
     let audit = match file.as_str() {
-        "composer.lock" => "composer audit",
-        "Pipfile.lock" => "pip-audit",
-        _ => "npm audit",
+        "composer.lock" => "`composer audit`",
+        "Pipfile.lock" | "poetry.lock" | "uv.lock" => "`pip-audit`",
+        "pnpm-lock.yaml" => "`pnpm audit`",
+        "yarn.lock" => "`yarn npm audit` (Yarn 1: `yarn audit`)",
+        _ => "`npm audit`",
     };
     Finding::new(
         "osv-vulnerable-packages",
@@ -310,7 +442,7 @@ fn grouped_finding(lockfile: &Path, mut hits: Vec<(&Package, &Vec<String>)>) -> 
     .with_scope("proj")
     .with_location(lockfile.to_string_lossy().as_ref(), None)
     .with_remediation(format!(
-        "Run `{audit}` in this project to see fixed versions, then upgrade."
+        "Run {audit} in this project to see fixed versions, then upgrade."
     ))
 }
 
@@ -344,6 +476,10 @@ pub fn scan_osv_with(
         return skip("offline mode");
     }
     let (pkgs, files) = collect_packages(project_dirs);
+    // Nothing read means nothing checked: never let the report call this "no known match".
+    if files == 0 {
+        return skip("no supported lockfile in the scanned projects");
+    }
     if pkgs.is_empty() {
         return (
             Vec::new(),
@@ -700,12 +836,98 @@ mod tests {
     }
 
     #[test]
-    fn test_osv_no_lockfiles_makes_no_request() {
+    fn test_osv_no_lockfiles_makes_no_request_and_is_not_checked() {
         let fake = Fake::new(no_vulns);
         let (f, i) = scan_osv_with(&ScanContext::new(), &[tmp()], &fake);
         assert!(fake.bodies.lock().unwrap().is_empty());
         assert!(f.is_empty());
         assert_eq!(i.len(), 1);
+        // Nothing was looked up, so the report must not say "no known match".
+        assert!(
+            matches!(&i[0].status, InspectionStatus::Skipped { reason } if reason.as_deref().unwrap_or("").contains("no supported lockfile")),
+            "{:?}",
+            i[0].status
+        );
+    }
+
+    #[test]
+    fn test_osv_parses_pnpm_lock_v5_v6_v9() {
+        let v9 = "lockfileVersion: '9.0'\n\nimporters:\n\n  .:\n    dependencies:\n      left-pad:\n        specifier: ^1.3.0\n        version: 1.3.0\n\npackages:\n\n  '@ctrl/tinycolor@4.1.1':\n    resolution: {integrity: sha512-x}\n\n  left-pad@1.3.0:\n    resolution: {integrity: sha512-y}\n\n  react-dom@18.2.0(react@18.2.0):\n    resolution: {integrity: sha512-z}\n\nsnapshots:\n\n  left-pad@1.3.0: {}\n";
+        assert_eq!(
+            names(&parse_pnpm_lock(v9)),
+            vec![
+                "npm:@ctrl/tinycolor@4.1.1",
+                "npm:left-pad@1.3.0",
+                "npm:react-dom@18.2.0"
+            ]
+        );
+        let v6 = "lockfileVersion: '6.0'\npackages:\n  /@babel/core@7.24.0:\n    resolution: {integrity: sha512-a}\n  /chalk@5.3.0(supports-color@9.0.0):\n    dev: false\n";
+        assert_eq!(
+            names(&parse_pnpm_lock(v6)),
+            vec!["npm:@babel/core@7.24.0", "npm:chalk@5.3.0"]
+        );
+        let v5 = "lockfileVersion: 5.4\npackages:\n  /@types/node/20.1.0:\n    dev: true\n  /ms/2.1.3:\n    dev: false\n";
+        assert_eq!(
+            names(&parse_pnpm_lock(v5)),
+            vec!["npm:@types/node@20.1.0", "npm:ms@2.1.3"]
+        );
+    }
+
+    #[test]
+    fn test_osv_parses_yarn_lock_classic_and_berry() {
+        let classic = "# yarn lockfile v1\n\n\"@babel/code-frame@^7.0.0\", \"@babel/code-frame@^7.10.4\":\n  version \"7.12.13\"\n  resolved \"https://registry.yarnpkg.com/x\"\n\nchalk@^4.1.0:\n  version \"4.1.2\"\n";
+        assert_eq!(
+            names(&parse_yarn_lock(classic)),
+            vec!["npm:@babel/code-frame@7.12.13", "npm:chalk@4.1.2"]
+        );
+        let berry = "__metadata:\n  version: 8\n\n\"@ctrl/tinycolor@npm:^4.1.0\":\n  version: 4.1.1\n  resolution: \"@ctrl/tinycolor@npm:4.1.1\"\n\n\"app@workspace:.\":\n  version: 0.0.0-use.local\n\n\"left-pad@patch:left-pad@npm%3A1.3.0#./p.patch\":\n  version: 1.3.0\n";
+        assert_eq!(
+            names(&parse_yarn_lock(berry)),
+            vec!["npm:@ctrl/tinycolor@4.1.1"]
+        );
+    }
+
+    #[test]
+    fn test_osv_parses_uv_and_poetry_locks() {
+        let uv = "version = 1\n\n[[package]]\nname = \"requests\"\nversion = \"2.31.0\"\nsource = { registry = \"https://pypi.org/simple\" }\n\n[[package]]\nname = \"myapp\"\nversion = \"0.1.0\"\nsource = { editable = \".\" }\n";
+        assert_eq!(names(&parse_uv_lock(uv)), vec!["PyPI:requests@2.31.0"]);
+        let poetry = "[[package]]\nname = \"django\"\nversion = \"4.2.1\"\ndescription = \"x\"\n\n[[package]]\nname = \"local-lib\"\nversion = \"0.1.0\"\n\n[package.source]\ntype = \"directory\"\nurl = \"../lib\"\n";
+        assert_eq!(names(&parse_poetry_lock(poetry)), vec!["PyPI:django@4.2.1"]);
+        assert!(parse_uv_lock("not toml [[").is_empty());
+        assert!(parse_poetry_lock("").is_empty());
+    }
+
+    #[test]
+    fn test_osv_yarn_finding_names_both_audit_commands() {
+        let p = pkg("npm", "chalk", "4.1.2");
+        let ids = vec!["GHSA-1".to_string()];
+        let f = grouped_finding(Path::new("/x/yarn.lock"), vec![(&p, &ids)]);
+        assert_eq!(
+            f.remediation.as_deref(),
+            Some("Run `yarn npm audit` (Yarn 1: `yarn audit`) in this project to see fixed versions, then upgrade.")
+        );
+    }
+
+    #[test]
+    fn test_osv_reads_pnpm_lock_from_a_project_and_names_its_audit_command() {
+        let d = tmp();
+        fs::write(
+            d.join("pnpm-lock.yaml"),
+            "lockfileVersion: '9.0'\npackages:\n  '@ctrl/tinycolor@4.1.1':\n    resolution: {integrity: sha512-x}\n",
+        )
+        .unwrap();
+        let fake = Fake::new(|req| {
+            let n = req["queries"].as_array().unwrap().len();
+            Ok(json!({ "results": vec![json!({"vulns": [{"id": "GHSA-aaaa-bbbb-cccc"}]}); n] }))
+        });
+        let (f, i) = scan_osv_with(&ScanContext::new(), &[d], &fake);
         assert!(matches!(i[0].status, InspectionStatus::Inspected { .. }));
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert!(f[0].title.contains("pnpm-lock.yaml"), "{}", f[0].title);
+        assert!(f[0]
+            .remediation
+            .as_deref()
+            .unwrap_or("")
+            .contains("pnpm audit"));
     }
 }

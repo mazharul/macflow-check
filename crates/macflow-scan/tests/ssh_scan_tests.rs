@@ -284,3 +284,16 @@ fn test_no_private_key_literals_in_test_sources() {
         "key-shaped literals in: {offenders:?}"
     );
 }
+
+#[test]
+fn test_authorized_keys_known_backdoor_key_is_critical() {
+    let auth_keys = "\
+ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleValidKey dev@laptop
+ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAttackerKeyAttackerKey svc-telemetry
+";
+    let findings = inspect_authorized_keys_content(auth_keys, "/Users/dev/.ssh/authorized_keys");
+    assert_eq!(findings.len(), 1, "{findings:?}");
+    assert_eq!(findings[0].id, "ssh-authorized-keys-known-backdoor");
+    assert_eq!(findings[0].severity, Severity::Critical);
+    assert_eq!(findings[0].line_number, Some(2));
+}

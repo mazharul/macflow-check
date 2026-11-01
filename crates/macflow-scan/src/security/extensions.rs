@@ -21,6 +21,9 @@ struct Bad {
     id: &'static str,
     versions: Option<&'static [&'static str]>,
     incident: &'static str,
+    /// Strings that must all appear in the extension's entry script. Empty: the id and
+    /// version alone identify it. Used when a clean build shares the bad version number.
+    markers: &'static [&'static str],
 }
 
 const BAD_EXTENSIONS: &[Bad] = &[
@@ -29,38 +32,124 @@ const BAD_EXTENSIONS: &[Bad] = &[
         versions: Some(&["18.95.0"]),
         incident: "Nx Console 18.95.0 shipped a credential stealer on 18 May 2026 (GHSA-c9j4-9m59-847w; \
                    https://www.stepsecurity.io/blog/nx-console-vs-code-extension-compromised). 18.100.0 is the fixed release.",
+        markers: &[],
     },
     Bad {
         id: "oorzc.ssh-tools",
         versions: None,
         incident: "GlassWorm loader in Open VSX releases, January 2026; the extension was removed entirely \
                    (https://socket.dev/blog/glassworm-loader-hits-open-vsx-via-suspected-developer-account-compromise).",
+        markers: &[],
     },
     Bad {
         id: "oorzc.i18n-tools-plus",
         versions: Some(&["1.6.8"]),
         incident: "GlassWorm loader in Open VSX, January 2026 \
                    (https://socket.dev/blog/glassworm-loader-hits-open-vsx-via-suspected-developer-account-compromise).",
+        markers: &[],
     },
     Bad {
         id: "oorzc.mind-map",
         versions: Some(&["1.0.61"]),
         incident: "GlassWorm loader in Open VSX, January 2026 \
                    (https://socket.dev/blog/glassworm-loader-hits-open-vsx-via-suspected-developer-account-compromise).",
+        markers: &[],
     },
     Bad {
         id: "oorzc.scss-to-css-compile",
         versions: Some(&["1.3.4"]),
         incident: "GlassWorm loader in Open VSX, January 2026 \
                    (https://socket.dev/blog/glassworm-loader-hits-open-vsx-via-suspected-developer-account-compromise).",
+        markers: &[],
+    },
+    Bad {
+        id: "anthropic.claude-code",
+        versions: Some(&["2.1.312", "2.1.313"]),
+        incident: "Cursor's marketplace served a trojanized build on 29 Oct 2026 that adds an SSH key and keeps \
+                   a reverse SSH tunnel open (https://www.stepsecurity.io/blog/claude-code-extension-trojanized). \
+                   2.1.314 is the fixed release.",
+        markers: &["134.209.82.225", "svc-telemetry"],
     },
 ];
 
-/// Files the Nx Console payload drops on macOS (StepSecurity, May 2026).
-const NX_INDICATORS: &[&str] = &[
-    "Library/LaunchAgents/com.user.kitty-monitor.plist",
-    ".local/share/kitty/cat.py",
+/// Files a published backdoor drops on macOS, relative to home.
+struct Indicator {
+    path: &'static str,
+    id: &'static str,
+    title: &'static str,
+    incident: &'static str,
+    remediation: &'static str,
+}
+
+const NX_INCIDENT: &str =
+    "This path matches a published indicator of the May 2026 Nx Console compromise \
+     (https://www.stepsecurity.io/blog/nx-console-vs-code-extension-compromised).";
+const NX_REMEDIATION: &str =
+    "Unload and delete the LaunchAgent and ~/.local/share/kitty/cat.py, then rotate your \
+     GitHub token and any cloud or API keys on this machine. Follow GHSA-c9j4-9m59-847w.";
+const CC_INCIDENT: &str = "This path matches a published indicator of the trojanized Claude Code extension \
+     on Cursor's marketplace, October 2026 (https://www.stepsecurity.io/blog/claude-code-extension-trojanized).";
+const CC_REMEDIATION: &str = "Unload it with `launchctl bootout gui/$(id -u)/com.apple.sysmond`, delete \
+     ~/Library/LaunchAgents/com.apple.sysmond.plist, ~/.config/.smt and ~/.config/.smtk, remove the \
+     svc-telemetry line from ~/.ssh/authorized_keys, turn off Remote Login if you do not use it, and rotate \
+     the keys that were on this Mac.";
+
+const BACKDOOR_FILES: &[Indicator] = &[
+    Indicator {
+        path: "Library/LaunchAgents/com.user.kitty-monitor.plist",
+        id: "nx-console-backdoor-indicator",
+        title: "File matching the Nx Console backdoor found",
+        incident: NX_INCIDENT,
+        remediation: NX_REMEDIATION,
+    },
+    Indicator {
+        path: ".local/share/kitty/cat.py",
+        id: "nx-console-backdoor-indicator",
+        title: "File matching the Nx Console backdoor found",
+        incident: NX_INCIDENT,
+        remediation: NX_REMEDIATION,
+    },
+    Indicator {
+        path: "Library/LaunchAgents/com.apple.sysmond.plist",
+        id: "claude-code-extension-backdoor-indicator",
+        title: "File matching the trojanized Claude Code extension backdoor found",
+        incident: CC_INCIDENT,
+        remediation: CC_REMEDIATION,
+    },
+    Indicator {
+        path: ".config/.smt",
+        id: "claude-code-extension-backdoor-indicator",
+        title: "File matching the trojanized Claude Code extension backdoor found",
+        incident: CC_INCIDENT,
+        remediation: CC_REMEDIATION,
+    },
+    Indicator {
+        path: ".config/.smtk",
+        id: "claude-code-extension-backdoor-indicator",
+        title: "File matching the trojanized Claude Code extension backdoor found",
+        incident: CC_INCIDENT,
+        remediation: CC_REMEDIATION,
+    },
 ];
+
+/// Whether the extension's entry script contains every marker; None if it can't be read.
+fn entry_has_markers(dir: &Path, markers: &[&str]) -> Option<bool> {
+    let main = std::fs::read_to_string(dir.join("package.json"))
+        .ok()
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+        .and_then(|v| v["main"].as_str().map(str::to_string))
+        .and_then(|m| safe_relative_location(&m).map(Path::to_path_buf));
+    let mut candidates = Vec::new();
+    if let Some(m) = main {
+        candidates.push(dir.join(&m));
+        candidates.push(dir.join(m.with_extension("js")));
+    }
+    candidates.push(dir.join("extension.js"));
+    candidates.push(dir.join("dist/extension.js"));
+    let bytes = candidates.iter().find_map(|p| std::fs::read(p).ok())?;
+    let text = String::from_utf8_lossy(&bytes);
+    Some(markers.iter().all(|m| text.contains(m)))
+}
 
 /// Returns (lowercase id, version) from package.json, or from a folder name such as
 /// `publisher.name-1.2.3` or `publisher.name-1.2.3-darwin-arm64`.
@@ -104,6 +193,34 @@ fn check_extension(
     if let Some(vs) = bad.versions {
         if !vs.contains(&version) {
             return None;
+        }
+    }
+    if !bad.markers.is_empty() {
+        match entry_has_markers(dir, bad.markers) {
+            Some(true) => {}
+            Some(false) => return None,
+            None => {
+                return Some(
+                    Finding::new(
+                        "extension-affected-version-unverified",
+                        format!("Extension version with a known bad build installed in {editor}: {id} {version}"),
+                        Category::Security,
+                        Severity::Medium,
+                        format!(
+                            "{id} {version} had a trojanized build, but its entry script could not be read to tell \
+                             which build this is. {}",
+                            bad.incident
+                        ),
+                    )
+                    .with_sub_category(EXT_SUB_CATEGORY)
+                    .with_scope(scope)
+                    .with_location(dir.to_string_lossy().as_ref(), None)
+                    .with_remediation(
+                        "Update the extension to the fixed release, then follow the incident report to check \
+                         whether the backdoor was installed.",
+                    ),
+                )
+            }
         }
     }
     Some(
@@ -295,31 +412,27 @@ pub fn scan_extensions_with_home(
         ));
     }
 
-    const MALWARE_SCOPE: &str = "user (Nx Console backdoor files)";
+    const MALWARE_SCOPE: &str = "user (files dropped by published backdoors)";
     inspections.push(Inspection::inspected(
         Category::Security,
         Some(MALWARE_FILES_SUB_CATEGORY),
         MALWARE_SCOPE,
     ));
-    for rel in NX_INDICATORS {
-        let p = home.join(rel);
+    for ind in BACKDOOR_FILES {
+        let p = home.join(ind.path);
         if p.is_file() {
             findings.push(
                 Finding::new(
-                    "nx-console-backdoor-indicator",
-                    "File matching the Nx Console backdoor found",
+                    ind.id,
+                    ind.title,
                     Category::Security,
                     Severity::Critical,
-                    "This path matches a published indicator of the May 2026 Nx Console compromise \
-                     (https://www.stepsecurity.io/blog/nx-console-vs-code-extension-compromised).",
+                    ind.incident,
                 )
                 .with_sub_category(MALWARE_FILES_SUB_CATEGORY)
                 .with_scope(MALWARE_SCOPE)
                 .with_location(p.to_string_lossy().as_ref(), None)
-                .with_remediation(
-                    "Unload and delete the LaunchAgent and ~/.local/share/kitty/cat.py, then rotate your \
-                     GitHub token and any cloud or API keys on this machine. Follow GHSA-c9j4-9m59-847w.",
-                ),
+                .with_remediation(ind.remediation),
             );
         }
     }
@@ -838,5 +951,108 @@ mod tests {
             .as_deref()
             .unwrap_or("")
             .ends_with("extensions.json"));
+    }
+
+    fn install_with_entry(
+        home: &Path,
+        folder: &str,
+        version: &str,
+        entry: Option<&str>,
+    ) -> PathBuf {
+        let dir = home.join(".cursor/extensions").join(folder);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("package.json"),
+            format!(
+                r#"{{"publisher":"Anthropic","name":"claude-code","version":"{version}","main":"./extension.js"}}"#
+            ),
+        )
+        .unwrap();
+        if let Some(js) = entry {
+            fs::write(dir.join("extension.js"), js).unwrap();
+        }
+        dir
+    }
+
+    #[test]
+    fn test_extension_trojanized_claude_code_build_is_critical() {
+        let home = tmp();
+        install_with_entry(
+            &home,
+            "anthropic.claude-code-2.1.313-darwin-arm64",
+            "2.1.313",
+            Some("const h='134.209.82.225';const k='ssh-ed25519 AAAA svc-telemetry';"),
+        );
+        let (f, _) = scan(&home);
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert_eq!(f[0].id, "extension-known-compromised");
+        assert_eq!(f[0].severity, Severity::Critical);
+        assert!(f[0].title.contains("Cursor"), "{}", f[0].title);
+        assert!(
+            f[0].description.contains("stepsecurity.io"),
+            "{}",
+            f[0].description
+        );
+    }
+
+    #[test]
+    fn test_extension_clean_build_of_an_affected_claude_code_version_is_not_flagged() {
+        // 2.1.312 on Open VSX was a clean build; only the trojanized bundle is flagged.
+        let home = tmp();
+        install_with_entry(
+            &home,
+            "anthropic.claude-code-2.1.312-darwin-arm64",
+            "2.1.312",
+            Some("module.exports={activate(){}};"),
+        );
+        install_with_entry(
+            &home,
+            "anthropic.claude-code-2.1.314-darwin-arm64",
+            "2.1.314",
+            Some("const h='134.209.82.225 svc-telemetry';"),
+        );
+        let (f, _) = scan(&home);
+        assert!(f.is_empty(), "{f:?}");
+    }
+
+    #[test]
+    fn test_extension_affected_version_with_unreadable_bundle_asks_for_a_check() {
+        let home = tmp();
+        install_with_entry(
+            &home,
+            "anthropic.claude-code-2.1.313-darwin-arm64",
+            "2.1.313",
+            None,
+        );
+        let (f, _) = scan(&home);
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert_eq!(f[0].id, "extension-affected-version-unverified");
+        assert_eq!(f[0].severity, Severity::Medium);
+    }
+
+    #[test]
+    fn test_extension_claude_code_backdoor_files_are_critical() {
+        let home = tmp();
+        fs::create_dir_all(home.join("Library/LaunchAgents")).unwrap();
+        fs::write(
+            home.join("Library/LaunchAgents/com.apple.sysmond.plist"),
+            "<plist/>",
+        )
+        .unwrap();
+        fs::create_dir_all(home.join(".config")).unwrap();
+        fs::write(home.join(".config/.smt"), "while true; do sleep 60; done").unwrap();
+        fs::write(home.join(".config/.smtk"), "key").unwrap();
+        let (f, i) = scan(&home);
+        assert_eq!(f.len(), 3, "{f:?}");
+        assert!(f.iter().all(|x| x.severity == Severity::Critical));
+        assert!(f
+            .iter()
+            .all(|x| x.id == "claude-code-extension-backdoor-indicator"));
+        assert!(f.iter().all(|x| x
+            .remediation
+            .as_deref()
+            .unwrap_or("")
+            .contains("svc-telemetry")));
+        assert!(!render(f, i).contains("Other findings"));
     }
 }

