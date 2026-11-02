@@ -1,0 +1,93 @@
+{
+  "schema": 1,
+  "serial": 2099010101,
+  "updated": "2099-01-01",
+  "incidents": [
+    {
+      "id": "nx-console",
+      "name": "Nx Console",
+      "summary": "Nx Console 18.95.0 shipped a credential stealer on 18 May 2026 (GHSA-c9j4-9m59-847w). 18.100.0 is the fixed release.",
+      "source": "https://www.stepsecurity.io/blog/nx-console-vs-code-extension-compromised",
+      "remediation": "Unload and delete the LaunchAgent and ~/.local/share/kitty/cat.py, then rotate your GitHub token and any cloud or API keys on this machine. Follow GHSA-c9j4-9m59-847w.",
+      "extensions": [
+        {
+          "id": "nrwl.angular-console",
+          "versions": [
+            "18.95.0"
+          ]
+        }
+      ],
+      "files": [
+        "Library/LaunchAgents/com.user.kitty-monitor.plist",
+        ".local/share/kitty/cat.py"
+      ]
+    },
+    {
+      "id": "glassworm",
+      "name": "GlassWorm",
+      "summary": "GlassWorm loader in Open VSX releases, January 2026; oorzc.ssh-tools was removed entirely.",
+      "source": "https://socket.dev/blog/glassworm-loader-hits-open-vsx-via-suspected-developer-account-compromise",
+      "extensions": [
+        {
+          "id": "oorzc.ssh-tools"
+        },
+        {
+          "id": "oorzc.i18n-tools-plus",
+          "versions": [
+            "1.6.8"
+          ]
+        },
+        {
+          "id": "oorzc.mind-map",
+          "versions": [
+            "1.0.61"
+          ]
+        },
+        {
+          "id": "oorzc.scss-to-css-compile",
+          "versions": [
+            "1.3.4"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "claude-code-extension",
+      "name": "trojanized Claude Code extension",
+      "summary": "Cursor's marketplace served a trojanized anthropic.claude-code build on 29 Oct 2026 that adds an SSH key and keeps a reverse SSH tunnel open. 2.1.314 is the fixed release.",
+      "source": "https://www.stepsecurity.io/blog/claude-code-extension-trojanized",
+      "remediation": "Unload it with `launchctl bootout gui/$(id -u)/com.apple.sysmond`, delete ~/Library/LaunchAgents/com.apple.sysmond.plist, ~/.config/.smt and ~/.config/.smtk, remove the svc-telemetry line from ~/.ssh/authorized_keys, turn off Remote Login if you do not use it, and rotate the keys that were on this Mac.",
+      "extensions": [
+        {
+          "id": "anthropic.claude-code",
+          "versions": [
+            "2.1.312",
+            "2.1.313"
+          ],
+          "markers": [
+            "134.209.82.225",
+            "svc-telemetry"
+          ]
+        }
+      ],
+      "files": [
+        "Library/LaunchAgents/com.apple.sysmond.plist",
+        ".config/.smt",
+        ".config/.smtk"
+      ],
+      "ssh_key_comments": [
+        "svc-telemetry"
+      ]
+    },
+    {
+      "id": "fixture-incident",
+      "name": "fixture",
+      "summary": "A test-only incident.",
+      "source": "https://example.com/advisory",
+      "remediation": "Delete the file.",
+      "files": [
+        ".fixture/marker-file"
+      ]
+    }
+  ]
+}

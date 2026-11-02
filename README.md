@@ -7,7 +7,7 @@
 Coding agents run `git`, `npm` and shell commands in repos you did not write. What actually runs is decided by a handful of config files: a hook in `.claude/settings.json`, an MCP server started with `npx -y`, a `core.fsmonitor` line in a repo's git config, a `curl | sh` in `.zshrc`, a token left in `~/.npmrc`. macflow-check reads those files and lists what to fix first.
 
 - **Read-only.** It never changes a file, never runs a program it finds, and never prints a secret: findings name the file, line and kind of value only.
-- **Local.** The only network call sends package names and versions to [OSV](https://osv.dev). `--offline` turns it off.
+- **Local.** It sends only package names and versions to [OSV](https://osv.dev), and downloads a signed [list of known-bad items](#the-known-bad-list). `--offline` turns both off.
 - **One binary.** No account, no config, no telemetry.
 
 ![macflow-check output: 7 to fix now, 2 worth fixing, each with a fix and a file location](docs/screenshot.png)
@@ -95,7 +95,7 @@ Not checked: Claude Code plugins (~/.claude/plugins directory not present), Depe
 Every finding: macflow-check --details · JSON: --json
 
 From MacFlow, the Mac app that snapshots your dev setup and shows what changed.
-Continuous watching for these checks (planned): macflow.ai/check
+Planned in MacFlow: an alert when a new login item, SSH key or editor extension appears: macflow.ai/check
 ```
 
 </details>
@@ -118,6 +118,18 @@ Each check follows a published incident or advisory:
 ## What leaves your Mac
 
 One thing, and only when you are online: the dependency check sends each lockfile package's name, version and ecosystem to the OSV `querybatch` API (`https://api.osv.dev/v1/querybatch`), using the system `curl`. Nothing else is sent: no file contents, paths, findings, secrets or usage data. `--offline` skips this call, and the report marks that check as not checked.
+
+Online runs also download the known-bad list below from GitHub: two plain `GET` requests that send nothing about your Mac. `--offline` skips them too.
+
+## The known-bad list
+
+Some checks match exact indicators from published incidents: extension releases, files a backdoor drops, and SSH key comments. They live in [`known-bad/known-bad.json`](known-bad/known-bad.json), each with a link to its source, so a new incident can be added without a new release.
+
+- **Built in, updated online.** Every release carries a copy. Online runs fetch the latest list and its signature and use it only if it is signed with the maintainer's [minisign](https://jedisct1.github.io/minisign/) key ([`known-bad/minisign.pub`](known-bad/minisign.pub)) and its serial number is newer than the built-in copy. A changed file, a different key, or an older list is ignored, and the report falls back to the built-in copy. The secret key never touches GitHub, so write access to this repository is not enough to change what scanners use.
+- **Exact matches only.** An entry names an extension ID with exact versions, an exact file path in your home folder, or an exact SSH key comment. There are no wildcards or patterns, at most 2,000 entries, and text with terminal control characters is rejected. A bad list can only flag specific named things.
+- **You can see which list ran.** The first line of the report ends with, for example, `list 2026-11-02`, or `list 2026-11-02 (built in: download failed)`.
+
+The general checks, such as the login item rules, are code and ship only with a release.
 
 ## What it checks
 
@@ -165,7 +177,7 @@ macflow-check [OPTIONS] [PATHS]...
                      (scans again: pass the same paths and --offline)
     --json           Output machine-readable JSON (schema v1)
     --no-color       Plain text (also NO_COLOR=1; CLICOLOR_FORCE=1 forces colour)
-    --offline        Skip network checks and run strictly offline
+    --offline        Skip network checks (OSV and the known-bad list download)
     --root <PATH>    Add a project root directory to scan (repeatable)
     -h, --help       Print this usage message
     -V, --version    Print version information
@@ -193,6 +205,8 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
 
+To add an incident to the known-bad list, add it to `known-bad/known-bad.json` with its source link, bump `serial`, and open a PR. The maintainer signs and publishes it with `scripts/known-bad.sh`.
+
 To report a vulnerability in macflow-check itself, see [SECURITY.md](SECURITY.md).
 
 ## Licence
@@ -201,4 +215,4 @@ MIT. See [LICENSE](LICENSE).
 
 ---
 
-macflow-check is made by [MacFlow](https://macflow.ai/check), a Mac app that snapshots your dev setup and shows what changed. Continuous watching for these checks is planned.
+macflow-check is made by [MacFlow](https://macflow.ai/check), a Mac app that snapshots your dev setup and shows what changed. Planned there: an alert when a new login item, SSH key or editor extension appears, which can catch an attack before anyone has written a rule for it.

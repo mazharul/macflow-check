@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+use macflow_scan::known_bad;
 use macflow_scan::{
     render_group, render_json, render_report, render_summary, scan_agent_autoapprove,
     scan_claude_plugins, scan_claude_settings, scan_credentials, scan_extensions, scan_garbage,
@@ -11,10 +12,10 @@ use macflow_scan::{
     Inspection, ScanContext, ScanResult, SummaryOptions,
 };
 
-const VERSION: &str = "macflow-check 0.2.0";
+const VERSION: &str = "macflow-check 0.3.0";
 
 const USAGE: &str = "\
-macflow-check 0.2.0
+macflow-check 0.3.0
 Read-only developer setup and environment scanner for macOS.
 
 USAGE:
@@ -26,7 +27,7 @@ OPTIONS:
                      (scans again: pass the same paths and --offline)
     --json           Output machine-readable JSON (schema v1)
     --no-color       Plain text (also NO_COLOR=1; CLICOLOR_FORCE=1 forces colour)
-    --offline        Skip network checks and run strictly offline
+    --offline        Skip network checks (OSV and the known-bad list download)
     --root <PATH>    Add a project root directory to scan (repeatable)
     -h, --help       Print this usage message
     -V, --version    Print version information
@@ -252,6 +253,9 @@ fn main() -> ExitCode {
 
     let ctx = ScanContext::new().with_roots(roots).with_offline(offline);
     let started = Instant::now();
+    let (list, list_status) = known_bad::load(offline);
+    let list_label = list.label(&list_status);
+    known_bad::set_active(list);
     let result = run_scan(&ctx);
     let opts = SummaryOptions {
         color: use_color(no_color),
@@ -261,6 +265,7 @@ fn main() -> ExitCode {
         offline,
         elapsed_secs: Some(started.elapsed().as_secs_f64()),
         version: env!("CARGO_PKG_VERSION"),
+        list: Some(list_label),
     };
 
     if json_mode {

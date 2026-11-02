@@ -16,6 +16,8 @@ pub struct SummaryOptions {
     pub elapsed_secs: Option<f64>,
     /// CLI version for the header line.
     pub version: &'static str,
+    /// Which known-bad list the scan used, e.g. "list 2026-11-02 (built in)".
+    pub list: Option<String>,
 }
 
 const RED: &str = "1;31";
@@ -293,6 +295,9 @@ pub fn render_summary(result: &ScanResult, opts: &SummaryOptions) -> String {
     } else {
         " · OSV not checked"
     });
+    if let Some(list) = &opts.list {
+        head.push_str(&format!(" · {list}"));
+    }
     let head = o.paint(BOLD, &head);
     o.line(&head);
     o.line("");
@@ -425,7 +430,7 @@ pub fn render_summary(result: &ScanResult, opts: &SummaryOptions) -> String {
     o.line(&promo);
     let link = o.paint(CYAN, "macflow.ai/check");
     o.line(&format!(
-        "Continuous watching for these checks (planned): {link}"
+        "Planned in MacFlow: an alert when a new login item, SSH key or editor extension appears: {link}"
     ));
     o.s
 }
@@ -554,7 +559,33 @@ mod tests {
             offline: true,
             elapsed_secs: Some(8.7),
             version: "0.1.0",
+            list: None,
         }
+    }
+
+    #[test]
+    fn the_footer_names_the_planned_macflow_alert() {
+        let s = render_summary(&sample(), &opts());
+        assert!(
+            s.contains("Planned in MacFlow: an alert when a new login item, SSH key or editor extension appears: macflow.ai/check"),
+            "{s}"
+        );
+    }
+
+    #[test]
+    fn the_header_names_the_known_bad_list() {
+        let o = SummaryOptions {
+            list: Some("list 2026-11-02 (built in: signature check failed)".into()),
+            ..opts()
+        };
+        let head = render_summary(&sample(), &o);
+        let first = head.lines().next().unwrap();
+        assert!(
+            first.ends_with(" · list 2026-11-02 (built in: signature check failed)"),
+            "{first}"
+        );
+        let plain = render_summary(&sample(), &opts());
+        assert!(!plain.lines().next().unwrap().contains("list"), "{plain}");
     }
 
     fn pos(s: &str, needle: &str) -> usize {

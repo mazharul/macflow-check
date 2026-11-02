@@ -1,5 +1,6 @@
 pub mod agent;
 pub mod garbage;
+pub mod known_bad;
 pub mod models;
 pub mod report;
 pub mod security;

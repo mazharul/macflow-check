@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
 
+use crate::known_bad::{self, Incident, KnownBad};
 use crate::models::{Category, Finding, Inspection, ScanContext, Severity};
 
 pub const EXT_SUB_CATEGORY: &str = "Editor extensions";
@@ -15,125 +16,8 @@ const EDITOR_DIRS: &[(&str, &str)] = &[
     (".windsurf", "Windsurf"),
 ];
 
-/// Known-compromised releases, each from a published incident report.
-/// `None` for versions means every release is affected.
-struct Bad {
-    id: &'static str,
-    versions: Option<&'static [&'static str]>,
-    incident: &'static str,
-    /// Strings that must all appear in the extension's entry script. Empty: the id and
-    /// version alone identify it. Used when a clean build shares the bad version number.
-    markers: &'static [&'static str],
-}
-
-const BAD_EXTENSIONS: &[Bad] = &[
-    Bad {
-        id: "nrwl.angular-console",
-        versions: Some(&["18.95.0"]),
-        incident: "Nx Console 18.95.0 shipped a credential stealer on 18 May 2026 (GHSA-c9j4-9m59-847w; \
-                   https://www.stepsecurity.io/blog/nx-console-vs-code-extension-compromised). 18.100.0 is the fixed release.",
-        markers: &[],
-    },
-    Bad {
-        id: "oorzc.ssh-tools",
-        versions: None,
-        incident: "GlassWorm loader in Open VSX releases, January 2026; the extension was removed entirely \
-                   (https://socket.dev/blog/glassworm-loader-hits-open-vsx-via-suspected-developer-account-compromise).",
-        markers: &[],
-    },
-    Bad {
-        id: "oorzc.i18n-tools-plus",
-        versions: Some(&["1.6.8"]),
-        incident: "GlassWorm loader in Open VSX, January 2026 \
-                   (https://socket.dev/blog/glassworm-loader-hits-open-vsx-via-suspected-developer-account-compromise).",
-        markers: &[],
-    },
-    Bad {
-        id: "oorzc.mind-map",
-        versions: Some(&["1.0.61"]),
-        incident: "GlassWorm loader in Open VSX, January 2026 \
-                   (https://socket.dev/blog/glassworm-loader-hits-open-vsx-via-suspected-developer-account-compromise).",
-        markers: &[],
-    },
-    Bad {
-        id: "oorzc.scss-to-css-compile",
-        versions: Some(&["1.3.4"]),
-        incident: "GlassWorm loader in Open VSX, January 2026 \
-                   (https://socket.dev/blog/glassworm-loader-hits-open-vsx-via-suspected-developer-account-compromise).",
-        markers: &[],
-    },
-    Bad {
-        id: "anthropic.claude-code",
-        versions: Some(&["2.1.312", "2.1.313"]),
-        incident: "Cursor's marketplace served a trojanized build on 29 Oct 2026 that adds an SSH key and keeps \
-                   a reverse SSH tunnel open (https://www.stepsecurity.io/blog/claude-code-extension-trojanized). \
-                   2.1.314 is the fixed release.",
-        markers: &["134.209.82.225", "svc-telemetry"],
-    },
-];
-
-/// Files a published backdoor drops on macOS, relative to home.
-struct Indicator {
-    path: &'static str,
-    id: &'static str,
-    title: &'static str,
-    incident: &'static str,
-    remediation: &'static str,
-}
-
-const NX_INCIDENT: &str =
-    "This path matches a published indicator of the May 2026 Nx Console compromise \
-     (https://www.stepsecurity.io/blog/nx-console-vs-code-extension-compromised).";
-const NX_REMEDIATION: &str =
-    "Unload and delete the LaunchAgent and ~/.local/share/kitty/cat.py, then rotate your \
-     GitHub token and any cloud or API keys on this machine. Follow GHSA-c9j4-9m59-847w.";
-const CC_INCIDENT: &str = "This path matches a published indicator of the trojanized Claude Code extension \
-     on Cursor's marketplace, October 2026 (https://www.stepsecurity.io/blog/claude-code-extension-trojanized).";
-const CC_REMEDIATION: &str = "Unload it with `launchctl bootout gui/$(id -u)/com.apple.sysmond`, delete \
-     ~/Library/LaunchAgents/com.apple.sysmond.plist, ~/.config/.smt and ~/.config/.smtk, remove the \
-     svc-telemetry line from ~/.ssh/authorized_keys, turn off Remote Login if you do not use it, and rotate \
-     the keys that were on this Mac.";
-
-const BACKDOOR_FILES: &[Indicator] = &[
-    Indicator {
-        path: "Library/LaunchAgents/com.user.kitty-monitor.plist",
-        id: "nx-console-backdoor-indicator",
-        title: "File matching the Nx Console backdoor found",
-        incident: NX_INCIDENT,
-        remediation: NX_REMEDIATION,
-    },
-    Indicator {
-        path: ".local/share/kitty/cat.py",
-        id: "nx-console-backdoor-indicator",
-        title: "File matching the Nx Console backdoor found",
-        incident: NX_INCIDENT,
-        remediation: NX_REMEDIATION,
-    },
-    Indicator {
-        path: "Library/LaunchAgents/com.apple.sysmond.plist",
-        id: "claude-code-extension-backdoor-indicator",
-        title: "File matching the trojanized Claude Code extension backdoor found",
-        incident: CC_INCIDENT,
-        remediation: CC_REMEDIATION,
-    },
-    Indicator {
-        path: ".config/.smt",
-        id: "claude-code-extension-backdoor-indicator",
-        title: "File matching the trojanized Claude Code extension backdoor found",
-        incident: CC_INCIDENT,
-        remediation: CC_REMEDIATION,
-    },
-    Indicator {
-        path: ".config/.smtk",
-        id: "claude-code-extension-backdoor-indicator",
-        title: "File matching the trojanized Claude Code extension backdoor found",
-        incident: CC_INCIDENT,
-        remediation: CC_REMEDIATION,
-    },
-];
-
 /// Whether the extension's entry script contains every marker; None if it can't be read.
-fn entry_has_markers(dir: &Path, markers: &[&str]) -> Option<bool> {
+fn entry_has_markers(dir: &Path, markers: &[String]) -> Option<bool> {
     let main = std::fs::read_to_string(dir.join("package.json"))
         .ok()
         .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
@@ -148,7 +32,7 @@ fn entry_has_markers(dir: &Path, markers: &[&str]) -> Option<bool> {
     candidates.push(dir.join("dist/extension.js"));
     let bytes = candidates.iter().find_map(|p| std::fs::read(p).ok())?;
     let text = String::from_utf8_lossy(&bytes);
-    Some(markers.iter().all(|m| text.contains(m)))
+    Some(markers.iter().all(|m| text.contains(m.as_str())))
 }
 
 /// Returns (lowercase id, version) from package.json, or from a folder name such as
@@ -182,21 +66,32 @@ fn identify(dir: &Path) -> Option<(String, String)> {
     }
 }
 
+/// The incident text shown with a finding: what happened, then the source link.
+fn incident_text(i: &Incident) -> String {
+    format!("{} ({})", i.summary, i.source)
+}
+
 fn check_extension(
+    list: &KnownBad,
     id: &str,
     version: &str,
     dir: &Path,
     editor: &str,
     scope: &str,
 ) -> Option<Finding> {
-    let bad = BAD_EXTENSIONS.iter().find(|b| b.id == id)?;
-    if let Some(vs) = bad.versions {
-        if !vs.contains(&version) {
-            return None;
-        }
-    }
+    let (incident, bad) = list.incidents.iter().find_map(|i| {
+        i.extensions
+            .iter()
+            .find(|b| {
+                b.id == id
+                    && b.versions
+                        .as_ref()
+                        .is_none_or(|vs| vs.iter().any(|v| v == version))
+            })
+            .map(|b| (i, b))
+    })?;
     if !bad.markers.is_empty() {
-        match entry_has_markers(dir, bad.markers) {
+        match entry_has_markers(dir, &bad.markers) {
             Some(true) => {}
             Some(false) => return None,
             None => {
@@ -209,7 +104,7 @@ fn check_extension(
                         format!(
                             "{id} {version} had a trojanized build, but its entry script could not be read to tell \
                              which build this is. {}",
-                            bad.incident
+                            incident_text(incident)
                         ),
                     )
                     .with_sub_category(EXT_SUB_CATEGORY)
@@ -229,7 +124,10 @@ fn check_extension(
             format!("Known-compromised extension installed in {editor}: {id} {version}"),
             Category::Security,
             Severity::Critical,
-            format!("{id} {version} matches a published compromise. {}", bad.incident),
+            format!(
+                "{id} {version} matches a published compromise. {}",
+                incident_text(incident)
+            ),
         )
         .with_sub_category(EXT_SUB_CATEGORY)
         .with_scope(scope)
@@ -256,6 +154,7 @@ fn safe_relative_location(rel: &str) -> Option<&Path> {
 }
 
 fn check_extensions_json(
+    list: &KnownBad,
     ext_dir: &Path,
     editor: &str,
     scope: &str,
@@ -294,7 +193,7 @@ fn check_extensions_json(
             .unwrap_or_else(|| json_path.clone());
 
         if !compromised_ids.contains(&id) {
-            if let Some(f) = check_extension(&id, version, &loc_path, editor, scope) {
+            if let Some(f) = check_extension(list, &id, version, &loc_path, editor, scope) {
                 compromised_ids.insert(id.clone());
                 findings.push(f);
                 continue;
@@ -350,6 +249,15 @@ pub fn scan_extensions_with_home(
     ctx: &ScanContext,
     home: Option<&Path>,
 ) -> (Vec<Finding>, Vec<Inspection>) {
+    scan_extensions_with_list(ctx, home, known_bad::active())
+}
+
+/// Scans with an explicit known-bad list (the CLI uses the one chosen for this run).
+pub fn scan_extensions_with_list(
+    ctx: &ScanContext,
+    home: Option<&Path>,
+    list: &KnownBad,
+) -> (Vec<Finding>, Vec<Inspection>) {
     let skip = |reason| {
         (
             Vec::new(),
@@ -384,13 +292,14 @@ pub fn scan_extensions_with_home(
         let mut compromised_ids = HashSet::new();
         for d in &dirs {
             if let Some((id, version)) = identify(d) {
-                if let Some(f) = check_extension(&id, &version, d, editor, &scope) {
+                if let Some(f) = check_extension(list, &id, &version, d, editor, &scope) {
                     compromised_ids.insert(id);
                     findings.push(f);
                 }
             }
         }
         check_extensions_json(
+            list,
             &ext_dir,
             editor,
             &scope,
@@ -418,22 +327,28 @@ pub fn scan_extensions_with_home(
         Some(MALWARE_FILES_SUB_CATEGORY),
         MALWARE_SCOPE,
     ));
-    for ind in BACKDOOR_FILES {
-        let p = home.join(ind.path);
-        if p.is_file() {
-            findings.push(
-                Finding::new(
-                    ind.id,
-                    ind.title,
-                    Category::Security,
-                    Severity::Critical,
-                    ind.incident,
-                )
-                .with_sub_category(MALWARE_FILES_SUB_CATEGORY)
-                .with_scope(MALWARE_SCOPE)
-                .with_location(p.to_string_lossy().as_ref(), None)
-                .with_remediation(ind.remediation),
-            );
+    for incident in &list.incidents {
+        for rel in &incident.files {
+            let p = home.join(rel);
+            if p.is_file() {
+                findings.push(
+                    Finding::new(
+                        format!("{}-backdoor-indicator", incident.id),
+                        format!("File matching the {} backdoor found", incident.name),
+                        Category::Security,
+                        Severity::Critical,
+                        format!(
+                            "This path matches a published indicator of the {} compromise. {}",
+                            incident.name,
+                            incident_text(incident)
+                        ),
+                    )
+                    .with_sub_category(MALWARE_FILES_SUB_CATEGORY)
+                    .with_scope(MALWARE_SCOPE)
+                    .with_location(p.to_string_lossy().as_ref(), None)
+                    .with_remediation(incident.remediation.as_str()),
+                );
+            }
         }
     }
 
@@ -1054,5 +969,23 @@ mod tests {
             .unwrap_or("")
             .contains("svc-telemetry")));
         assert!(!render(f, i).contains("Other findings"));
+    }
+    #[test]
+    fn test_extension_scan_uses_the_list_it_is_given() {
+        // A new incident in a downloaded list is flagged without a new release.
+        let list =
+            crate::known_bad::parse(include_str!("../known_bad_fixtures/newer.json")).unwrap();
+        let home = tmp();
+        fs::create_dir_all(home.join(".fixture")).unwrap();
+        fs::write(home.join(".fixture/marker-file"), "x").unwrap();
+        let (f, _) = scan_extensions_with_list(&ScanContext::new(), Some(&home), &list);
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert_eq!(f[0].id, "fixture-incident-backdoor-indicator");
+        assert!(f[0].description.contains("https://example.com/advisory"));
+        let (f, _) = scan(&home);
+        assert!(
+            f.is_empty(),
+            "the built-in list does not know this file: {f:?}"
+        );
     }
 }

@@ -270,21 +270,38 @@ pub fn inspect_ssh_config_content(content: &str, file_path: &str) -> Vec<Finding
     findings
 }
 
-/// Inspects ~/.ssh/authorized_keys content for forced command directives.
+/// Inspects ~/.ssh/authorized_keys content for known backdoor keys and forced commands.
 pub fn inspect_authorized_keys_content(content: &str, file_path: &str) -> Vec<Finding> {
+    inspect_authorized_keys_with_list(content, file_path, crate::known_bad::active())
+}
+
+/// Same, with an explicit known-bad list.
+pub fn inspect_authorized_keys_with_list(
+    content: &str,
+    file_path: &str,
+    list: &crate::known_bad::KnownBad,
+) -> Vec<Finding> {
     let mut findings = Vec::new();
     for (idx, line) in content.lines().enumerate() {
         let trimmed = line.trim();
         if trimmed.is_empty() || trimmed.starts_with('#') {
             continue;
         }
-        if trimmed.split_whitespace().last() == Some("svc-telemetry") {
+        let comment = trimmed.split_whitespace().last().unwrap_or("");
+        let known = list
+            .incidents
+            .iter()
+            .find(|i| i.ssh_key_comments.iter().any(|c| c == comment));
+        if let Some(incident) = known {
             findings.push(make_finding(
                 "ssh-authorized-keys-known-backdoor",
                 "Backdoor SSH key in authorized_keys",
                 Severity::Critical,
-                "This key's comment, svc-telemetry, matches the key added by the trojanized Claude Code extension on Cursor's marketplace, October 2026 (https://www.stepsecurity.io/blog/claude-code-extension-trojanized). Whoever holds it can log in to this Mac when Remote Login is on.",
-                "Delete this line, turn off Remote Login if you do not use it, then check ~/Library/LaunchAgents/com.apple.sysmond.plist and ~/.config/.smt and rotate the keys that were on this Mac.",
+                format!(
+                    "This key's comment, {comment}, matches the key added by the {} ({}). {} Whoever holds it can log in to this Mac when Remote Login is on.",
+                    incident.name, incident.source, incident.summary
+                ),
+                incident.remediation.as_str(),
                 file_path,
                 idx + 1,
             ));
